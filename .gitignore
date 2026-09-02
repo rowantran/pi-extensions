@@ -1,0 +1,7 @@
+# Machine-local extension linked from the private Isara checkout.
+/isara-provider.ts
+
+# Local/generated files.
+.DS_Store
+node_modules/
+*.local.*
