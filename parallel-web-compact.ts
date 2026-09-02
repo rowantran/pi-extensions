@@ -1,5 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import parallelWebExtension from "../npm/node_modules/@parallel-web/pi-extension/dist/index.js";
+import parallelWebExtension from "@parallel-web/pi-extension/dist/index.js";
 import { withCompactToolRendering } from "./compact-tools.ts";
 
 /**
