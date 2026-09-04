@@ -32,6 +32,7 @@ interface ToolStatus {
 type RenderContext = ToolStatus & {
 	expanded: boolean;
 	state: Record<string, unknown>;
+	invalidate: () => void;
 };
 
 type CompactStatus = "running" | "success" | "error";
@@ -72,6 +73,92 @@ function firstOutputLine(value: string, fallback: string): string {
 		.split("\n")
 		.map(collapseWhitespace)
 		.find(Boolean) ?? fallback;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function summarizeMcpPayload(value: unknown): string {
+	if (typeof value === "string") {
+		try {
+			return summarizeMcpPayload(JSON.parse(value));
+		} catch {
+			return collapseWhitespace(value);
+		}
+	}
+	if (!isRecord(value)) return summarizeCustomToolArguments(value);
+
+	for (const key of ["operation", "query", "name", "path", "id", "type"]) {
+		if (typeof value[key] === "string" && value[key]) {
+			return collapseWhitespace(value[key]);
+		}
+	}
+	return summarizeCustomToolArguments(value);
+}
+
+interface ToolCallHeading {
+	name: string;
+	detail: string;
+	isMcpCall: boolean;
+}
+
+function customToolHeading(toolName: string, args: unknown): ToolCallHeading {
+	if (!isRecord(args)) {
+		return { name: toolName, detail: summarizeCustomToolArguments(args), isMcpCall: false };
+	}
+
+	const values = args;
+	const namespaceServer = toolName.startsWith("mcp__") ? toolName.slice("mcp__".length) : undefined;
+	if (toolName === "mcp" || namespaceServer) {
+		if (typeof values.tool === "string" && values.tool) {
+			const server = typeof values.server === "string" && values.server
+				? values.server
+				: namespaceServer;
+			const target = server ? `${server}/${values.tool}` : values.tool;
+			const payload = values.args === undefined ? "" : summarizeMcpPayload(values.args);
+			return {
+				name: "mcp",
+				detail: payload ? `${target} · ${payload}` : target,
+				isMcpCall: true,
+			};
+		}
+
+		for (const action of ["connect", "describe", "instructions", "search"] as const) {
+			if (typeof values[action] === "string" && values[action]) {
+				const server = action === "search" && typeof values.server === "string"
+					? ` · ${values.server}`
+					: "";
+				return { name: "mcp", detail: `${action} · ${values[action]}${server}`, isMcpCall: false };
+			}
+		}
+		if (typeof values.server === "string" && values.server) {
+			return { name: "mcp", detail: `list · ${values.server}`, isMcpCall: false };
+		}
+		if (typeof values.action === "string" && values.action) {
+			return { name: "mcp", detail: values.action, isMcpCall: false };
+		}
+		return { name: "mcp", detail: "status", isMcpCall: false };
+	}
+
+	return { name: toolName, detail: summarizeCustomToolArguments(args), isMcpCall: false };
+}
+
+function summarizeMcpOutput(output: string, failed: boolean): Summary {
+	if (failed) return { text: firstOutputLine(output, "Failed") };
+
+	const trimmed = output.trim();
+	if (!trimmed) return { text: "Completed" };
+	try {
+		const parsed = JSON.parse(trimmed);
+		if (Array.isArray(parsed)) {
+			return { text: `Returned ${parsed.length} ${parsed.length === 1 ? "item" : "items"}` };
+		}
+		if (isRecord(parsed)) return { text: "Returned JSON" };
+	} catch {
+		if (/^[{[]/.test(trimmed)) return { text: "Returned JSON" };
+	}
+	return { text: firstOutputLine(output, "Completed") };
 }
 
 function compactState(context: RenderContext): CompactState {
@@ -170,6 +257,7 @@ function collapsedLine(getText: () => string): Component {
 }
 
 let showFullToolCall = false;
+const compactCallInvalidators = new Set<() => void>();
 
 function compactCall(
 	theme: Theme,
@@ -178,6 +266,7 @@ function compactCall(
 	args: unknown,
 	context: RenderContext,
 ): Component {
+	compactCallInvalidators.add(context.invalidate);
 	const state = compactState(context);
 	state.status = status(context);
 	if (context.isPartial && !state.summary) {
@@ -313,24 +402,28 @@ function compactCustomTool(
 		...tool,
 		renderShell: "self",
 		renderCall(args, theme, context) {
+			const heading = customToolHeading(tool.name, args);
 			return compactCall(
 				theme,
-				tool.name,
-				summarizeCustomToolArguments(args),
+				heading.name,
+				heading.detail,
 				args,
 				context as RenderContext,
 			);
 		},
 		renderResult(result, options, theme, context) {
+			const heading = customToolHeading(tool.name, context.args);
 			return compactResult(
 				result,
 				options,
 				theme,
 				context as RenderContext,
 				"Working…",
-				(output, failed) => ({
-					text: failed ? firstOutputLine(output, "Failed") : firstOutputLine(output, "Completed"),
-				}),
+				heading.isMcpCall
+					? summarizeMcpOutput
+					: (output, failed) => ({
+						text: failed ? firstOutputLine(output, "Failed") : firstOutputLine(output, "Completed"),
+					}),
 			);
 		},
 	};
@@ -355,11 +448,11 @@ export function withCompactToolRendering(pi: ExtensionAPI): ExtensionAPI {
 function toggleToolCall(ctx: ExtensionContext): void {
 	showFullToolCall = !showFullToolCall;
 
-	// Rebuild every existing tool component while preserving the independent
-	// Ctrl+O output-expansion state. Synchronous updates coalesce into one frame.
-	const outputExpanded = ctx.ui.getToolsExpanded();
-	ctx.ui.setToolsExpanded(!outputExpanded);
-	ctx.ui.setToolsExpanded(outputExpanded);
+	// Ask each compact tool row to rebuild directly. Toggling Pi's independent
+	// Ctrl+O output state twice did not reliably invalidate settled rows.
+	const invalidators = [...compactCallInvalidators];
+	compactCallInvalidators.clear();
+	for (const invalidate of invalidators) invalidate();
 	ctx.ui.notify(`Tool calls: ${showFullToolCall ? "full" : "compact"}`, "info");
 }
 
