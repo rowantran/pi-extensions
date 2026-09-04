@@ -79,33 +79,52 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function summarizeMcpPayload(value: unknown): string {
-	if (typeof value === "string") {
-		try {
-			return summarizeMcpPayload(JSON.parse(value));
-		} catch {
-			return collapseWhitespace(value);
-		}
+function normalizeMcpPayload(value: unknown): unknown {
+	if (typeof value !== "string") return value;
+	try {
+		return JSON.parse(value);
+	} catch {
+		return value;
 	}
-	if (!isRecord(value)) return summarizeCustomToolArguments(value);
+}
+
+function summarizeMcpPayload(value: unknown): string {
+	const normalized = normalizeMcpPayload(value);
+	if (typeof normalized === "string") return collapseWhitespace(normalized);
+	if (!isRecord(normalized)) return summarizeCustomToolArguments(normalized);
 
 	for (const key of ["operation", "query", "name", "path", "id", "type"]) {
-		if (typeof value[key] === "string" && value[key]) {
-			return collapseWhitespace(value[key]);
+		if (typeof normalized[key] === "string" && normalized[key]) {
+			return collapseWhitespace(normalized[key]);
 		}
 	}
-	return summarizeCustomToolArguments(value);
+	return summarizeCustomToolArguments(normalized);
+}
+
+interface McpHeading {
+	action?: string;
+	actionValue?: string;
+	server?: string;
+	tool?: string;
+	argumentPreview?: string;
 }
 
 interface ToolCallHeading {
 	name: string;
 	detail: string;
+	expandedArgs: unknown;
 	isMcpCall: boolean;
+	mcp?: McpHeading;
 }
 
 function customToolHeading(toolName: string, args: unknown): ToolCallHeading {
 	if (!isRecord(args)) {
-		return { name: toolName, detail: summarizeCustomToolArguments(args), isMcpCall: false };
+		return {
+			name: toolName,
+			detail: summarizeCustomToolArguments(args),
+			expandedArgs: args,
+			isMcpCall: false,
+		};
 	}
 
 	const values = args;
@@ -115,12 +134,17 @@ function customToolHeading(toolName: string, args: unknown): ToolCallHeading {
 			const server = typeof values.server === "string" && values.server
 				? values.server
 				: namespaceServer;
-			const target = server ? `${server}/${values.tool}` : values.tool;
-			const payload = values.args === undefined ? "" : summarizeMcpPayload(values.args);
+			const payload = normalizeMcpPayload(values.args);
 			return {
 				name: "mcp",
-				detail: payload ? `${target} · ${payload}` : target,
+				detail: "",
+				expandedArgs: payload,
 				isMcpCall: true,
+				mcp: {
+					server,
+					tool: values.tool,
+					argumentPreview: values.args === undefined ? "" : summarizeMcpPayload(payload),
+				},
 			};
 		}
 
@@ -129,19 +153,74 @@ function customToolHeading(toolName: string, args: unknown): ToolCallHeading {
 				const server = action === "search" && typeof values.server === "string"
 					? ` · ${values.server}`
 					: "";
-				return { name: "mcp", detail: `${action} · ${values[action]}${server}`, isMcpCall: false };
+				return {
+					name: "mcp",
+					detail: "",
+					expandedArgs: args,
+					isMcpCall: false,
+					mcp: { action, actionValue: `${values[action]}${server}` },
+				};
 			}
 		}
 		if (typeof values.server === "string" && values.server) {
-			return { name: "mcp", detail: `list · ${values.server}`, isMcpCall: false };
+			return {
+				name: "mcp",
+				detail: "",
+				expandedArgs: args,
+				isMcpCall: false,
+				mcp: { action: "list", actionValue: values.server },
+			};
 		}
 		if (typeof values.action === "string" && values.action) {
-			return { name: "mcp", detail: values.action, isMcpCall: false };
+			return {
+				name: "mcp",
+				detail: "",
+				expandedArgs: args,
+				isMcpCall: false,
+				mcp: { action: values.action },
+			};
 		}
-		return { name: "mcp", detail: "status", isMcpCall: false };
+		return {
+			name: "mcp",
+			detail: "",
+			expandedArgs: args,
+			isMcpCall: false,
+			mcp: { action: "status" },
+		};
 	}
 
-	return { name: toolName, detail: summarizeCustomToolArguments(args), isMcpCall: false };
+	return {
+		name: toolName,
+		detail: summarizeCustomToolArguments(args),
+		expandedArgs: args,
+		isMcpCall: false,
+	};
+}
+
+function capitalize(value: string): string {
+	return value ? value[0]!.toUpperCase() + value.slice(1) : value;
+}
+
+function renderCustomToolHeading(theme: Theme, heading: ToolCallHeading): string | undefined {
+	if (!heading.mcp) return undefined;
+
+	let text = theme.fg("toolTitle", theme.bold("mcp")) + theme.fg("dim", " · ");
+	if (heading.mcp.action) {
+		text += theme.fg("accent", capitalize(heading.mcp.action));
+		if (heading.mcp.actionValue) {
+			text += theme.fg("dim", " (") + theme.fg("text", heading.mcp.actionValue) + theme.fg("dim", ")");
+		}
+		return text;
+	}
+
+	if (heading.mcp.server) {
+		text += theme.fg("text", heading.mcp.server) + theme.fg("dim", " / ");
+	}
+	text += theme.fg("text", heading.mcp.tool ?? "unknown");
+	if (heading.mcp.argumentPreview) {
+		text += theme.fg("dim", " (") + theme.fg("text", heading.mcp.argumentPreview) + theme.fg("dim", ")");
+	}
+	return text;
 }
 
 function summarizeMcpOutput(output: string, failed: boolean): Summary {
@@ -256,8 +335,23 @@ function collapsedLine(getText: () => string): Component {
 	};
 }
 
-let showFullToolCall = false;
-const compactCallInvalidators = new Set<() => void>();
+interface CompactRenderingState {
+	showFullToolCall: boolean;
+	invalidators: Set<() => void>;
+}
+
+type CompactRenderingGlobal = typeof globalThis & {
+	__piExtensionsCompactRendering?: CompactRenderingState;
+};
+
+function compactRenderingState(): CompactRenderingState {
+	const sharedGlobal = globalThis as CompactRenderingGlobal;
+	sharedGlobal.__piExtensionsCompactRendering ??= {
+		showFullToolCall: false,
+		invalidators: new Set(),
+	};
+	return sharedGlobal.__piExtensionsCompactRendering;
+}
 
 function compactCall(
 	theme: Theme,
@@ -265,16 +359,18 @@ function compactCall(
 	detail: string,
 	args: unknown,
 	context: RenderContext,
+	headingOverride?: string,
 ): Component {
-	compactCallInvalidators.add(context.invalidate);
+	const renderingState = compactRenderingState();
+	renderingState.invalidators.add(context.invalidate);
 	const state = compactState(context);
 	state.status = status(context);
 	if (context.isPartial && !state.summary) {
 		state.summary = theme.fg("toolOutput", "Running…");
 	}
-	const heading = toolHeading(theme, name, detail);
+	const heading = headingOverride ?? toolHeading(theme, name, detail);
 
-	if (!context.expanded && !showFullToolCall) {
+	if (!context.expanded && !renderingState.showFullToolCall) {
 		return collapsedLine(() => {
 			const output = state.summary
 				? theme.fg("dim", " ── ") + state.summary
@@ -291,7 +387,7 @@ function compactCall(
 		},
 	];
 
-	if (showFullToolCall) {
+	if (renderingState.showFullToolCall) {
 		const argumentLines = JSON.stringify(args, null, 2)?.split("\n") ?? [];
 		for (const line of argumentLines) {
 			rows.push({
@@ -407,8 +503,9 @@ function compactCustomTool(
 				theme,
 				heading.name,
 				heading.detail,
-				args,
+				heading.expandedArgs,
 				context as RenderContext,
+				renderCustomToolHeading(theme, heading),
 			);
 		},
 		renderResult(result, options, theme, context) {
@@ -446,14 +543,18 @@ export function withCompactToolRendering(pi: ExtensionAPI): ExtensionAPI {
 }
 
 function toggleToolCall(ctx: ExtensionContext): void {
-	showFullToolCall = !showFullToolCall;
+	const renderingState = compactRenderingState();
+	renderingState.showFullToolCall = !renderingState.showFullToolCall;
 
-	// Ask each compact tool row to rebuild directly. Toggling Pi's independent
-	// Ctrl+O output state twice did not reliably invalidate settled rows.
-	const invalidators = [...compactCallInvalidators];
-	compactCallInvalidators.clear();
+	// Both extension entry points use this shared state even when Pi evaluates
+	// compact-tools.ts as separate module instances.
+	const invalidators = [...renderingState.invalidators];
+	renderingState.invalidators.clear();
 	for (const invalidate of invalidators) invalidate();
-	ctx.ui.notify(`Tool calls: ${showFullToolCall ? "full" : "compact"}`, "info");
+	ctx.ui.notify(
+		`Tool calls: ${renderingState.showFullToolCall ? "full" : "compact"}`,
+		"info",
+	);
 }
 
 function createBuiltInTools(cwd: string) {
@@ -482,6 +583,9 @@ function getBuiltInTools(cwd: string): BuiltInTools {
 
 export default function compactTools(pi: ExtensionAPI): void {
 	const initialTools = getBuiltInTools(process.cwd());
+	const renderingState = compactRenderingState();
+	renderingState.showFullToolCall = false;
+	renderingState.invalidators.clear();
 
 	pi.registerShortcut("alt+o", {
 		description: "Expand or collapse compact tool calls",
