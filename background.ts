@@ -34,6 +34,7 @@ import {
 import { StringEnum } from "@earendil-works/pi-ai";
 import { stripTerminalSequences, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import { withCompactToolRendering } from "./compact-tools.ts";
 
 const MAX_RUNNING_SHELLS = 8;
 const MAX_RUNNING_AGENTS = 4;
@@ -51,6 +52,7 @@ const MAX_WIDGET_ITEMS = 5;
 const WIDGET_TICK_MS = 1_000;
 const WIDGET_ID = "background-running";
 const KILL_ESCALATION_MS = 5_000;
+const NOTICE_RENDER_MAX_OUTPUT_LINES = 5;
 
 const TERMINAL_STATES = new Set<ActivityState>(["completed", "failed", "stopped", "timed_out"]);
 
@@ -261,6 +263,7 @@ const SendParameters = Type.Object({
 });
 
 export default function background(pi: ExtensionAPI): void {
+	pi = withCompactToolRendering(pi);
 	const activities = new Map<string, Activity>();
 	let nextShellId = 1;
 	let nextAgentId = 1;
@@ -1009,10 +1012,17 @@ export default function background(pi: ExtensionAPI): void {
 
 	pi.registerMessageRenderer("background", (message, _options, theme) => {
 		const content = typeof message.content === "string" ? message.content : "";
-		const [first, ...rest] = content.split("\n");
-		let text = `${theme.fg("accent", "● ")}${theme.fg("muted", first ?? "")}`;
-		if (rest.length > 0) text += `\n${theme.fg("dim", rest.join("\n"))}`;
-		return new Text(text, 0, 0);
+		const [first = "", ...output] = content.split("\n");
+		const visibleOutput = output.slice(0, NOTICE_RENDER_MAX_OUTPUT_LINES);
+		const hiddenLines = output.length - visibleOutput.length;
+		const lines = [
+			`  ${theme.fg("accent", "● ")}${theme.fg("muted", first)}`,
+			...visibleOutput.map((line) => `    ${theme.fg("dim", line || " ")}`),
+		];
+		if (hiddenLines > 0) {
+			lines.push(`    ${theme.fg("dim", `(+ ${hiddenLines} ${hiddenLines === 1 ? "line" : "lines"})`)}`);
+		}
+		return new Text(lines.join("\n"), 0, 0);
 	});
 
 	pi.registerCommand("background", {

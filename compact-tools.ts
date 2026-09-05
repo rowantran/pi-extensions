@@ -466,7 +466,7 @@ function summarizeCustomToolArguments(args: unknown): string {
 	if (!args || typeof args !== "object") return "";
 
 	const values = args as Record<string, unknown>;
-	for (const key of ["query", "path", "command", "action"]) {
+	for (const key of ["query", "path", "command", "action", "task", "id", "name", "kind"]) {
 		if (typeof values[key] === "string" && values[key]) {
 			return collapseWhitespace(values[key]);
 		}
