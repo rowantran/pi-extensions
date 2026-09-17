@@ -16,7 +16,8 @@
   },
   "dependencies": {
     "@parallel-web/pi-extension": "1.2.0",
-    "pi-mcp-adapter": "2.32.1"
+    "pi-mcp-adapter": "2.32.1",
+    "proper-lockfile": "4.1.2"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",

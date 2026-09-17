@@ -4,4 +4,5 @@
 # Local/generated files.
 .DS_Store
 node_modules/
+.pi/subagents/
 *.local.*

@@ -3,8 +3,8 @@
  *
  * Both kinds share lifecycle, status, output, cancellation, widget UI, bounded
  * retention, and automatic completion wake-up. Finished activities never
- * consume running capacity. Agent runtimes remain resumable for a short grace
- * period, then stop automatically while their final result remains available.
+ * consume running capacity. Idle agent runtimes stop after a short grace period;
+ * saved sessions remain resumable after runtime cleanup or parent restarts.
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
@@ -19,7 +19,8 @@ import {
 	unlinkSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
 	getPackageDir,
 	RpcClient,
@@ -33,11 +34,20 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { stripTerminalSequences, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { withCompactToolRendering } from "./compact-tools.ts";
+import {
+	AGENT_FORGET_ENTRY,
+	AGENT_REFERENCE_ENTRY,
+	createSavedAgent,
+	readSavedAgent,
+	type SavedAgent,
+} from "./background/sessions.ts";
 
 const MAX_RUNNING_SHELLS = 8;
 const MAX_RUNNING_AGENTS = 4;
 const MAX_FINISHED_KEPT = 20;
 const AGENT_RESUME_GRACE_MS = 5 * 60 * 1_000;
+const AGENT_HEALTH_CHECK_MS = 5_000;
+const AGENT_RUNNER = fileURLToPath(new URL("./background/runner.mjs", import.meta.url));
 const MIN_CHECKIN_SECONDS = 30;
 const NOTICE_SHELL_BYTES = 4_096;
 const NOTICE_AGENT_BYTES = 12_000;
@@ -91,6 +101,11 @@ interface AgentUsage {
 interface AgentActivity extends BaseActivity {
 	kind: "agent";
 	task: string;
+	sessionId: string;
+	sessionFile: string;
+	starting?: boolean;
+	monitorTimer?: NodeJS.Timeout;
+	reapPromise?: Promise<void>;
 	client?: RpcClient;
 	lastText: string;
 	activity: string[];
@@ -234,28 +249,28 @@ const StartParameters = Type.Object({
 });
 
 const IdParameters = Type.Object({
-	id: Type.String({ description: "Background activity id" }),
+	id: Type.String({ description: "Background activity ID or saved subagent session file" }),
 });
 
 const StatusParameters = Type.Object({
-	id: Type.Optional(Type.String({ description: "Activity id; omit to list all retained activities" })),
+	id: Type.Optional(Type.String({ description: "Activity ID or saved subagent session file; omit to list retained activities" })),
 });
 
 const OutputParameters = Type.Object({
-	id: Type.String({ description: "Background activity id" }),
+	id: Type.String({ description: "Background activity ID or saved subagent session file" }),
 	lines: Type.Optional(Type.Number({ description: `Maximum shell log lines, default ${OUTPUT_DEFAULT_LINES}` })),
 });
 
 const SendParameters = Type.Object({
-	id: Type.String({ description: "Background agent id" }),
-	message: Type.String({ description: "Instruction to steer a running agent or continue a finished one" }),
+	id: Type.String({ description: "Background agent ID or saved subagent session file, including after a parent restart" }),
+	message: Type.String({ description: "Instruction to steer a running agent or resume its saved conversation" }),
 });
 
 export default function background(pi: ExtensionAPI): void {
 	pi = withCompactToolRendering(pi);
 	const activities = new Map<string, Activity>();
+	const agentReferences = new Map<string, string>();
 	let nextShellId = 1;
-	let nextAgentId = 1;
 	let logDir: string | undefined;
 	let ui: ExtensionContext["ui"] | undefined;
 	let widgetTimer: NodeJS.Timeout | undefined;
@@ -315,11 +330,32 @@ export default function background(pi: ExtensionAPI): void {
 		}
 	}
 
-	function requireActivity(id: string | undefined): Activity {
+	function rememberAgent(activity: AgentActivity): void {
+		if (agentReferences.get(activity.id) === activity.sessionFile) return;
+		agentReferences.set(activity.id, activity.sessionFile);
+		pi.appendEntry(AGENT_REFERENCE_ENTRY, {
+			id: activity.id, sessionId: activity.sessionId, sessionFile: activity.sessionFile,
+		});
+	}
+
+	function restoreAgent(saved: SavedAgent): AgentActivity {
+		const activity: AgentActivity = {
+			...saved, kind: "agent", activity: [], runId: 0, notifiedRunId: 0, endedAt: saved.updatedAt,
+		};
+		activities.set(activity.id, activity);
+		return activity;
+	}
+
+	function requireActivity(id: string | undefined, ctx?: ExtensionContext): Activity {
 		if (!id) throw new Error("This operation requires an activity id.");
 		const activity = activities.get(id);
-		if (!activity) throw new Error(`Unknown background activity: ${id}. Use background_status to list activities.`);
-		return activity;
+		if (activity) return activity;
+		const path = agentReferences.get(id) ?? (id.endsWith(".jsonl") ? resolve(ctx?.cwd ?? process.cwd(), id) : undefined);
+		if (!path) throw new Error(`Unknown background activity: ${id}. Use background_status or supply its saved session file.`);
+		const saved = readSavedAgent(path);
+		const restored = activities.get(saved.id) ?? restoreAgent(saved);
+		if (restored.kind === "agent") rememberAgent(restored);
+		return restored;
 	}
 
 	function clearShellTimers(activity: ShellActivity): void {
@@ -342,20 +378,28 @@ export default function background(pi: ExtensionAPI): void {
 		}
 	}
 
+	function clearAgentMonitor(activity: AgentActivity): void {
+		if (activity.monitorTimer) clearInterval(activity.monitorTimer);
+		activity.monitorTimer = undefined;
+	}
+
 	async function reapAgentRuntime(activity: AgentActivity): Promise<void> {
 		if (activity.reapTimer) {
 			clearTimeout(activity.reapTimer);
 			activity.reapTimer = undefined;
 		}
+		clearAgentMonitor(activity);
+		if (activity.reapPromise) return activity.reapPromise;
 		const client = activity.client;
 		if (!client) return;
 		activity.client = undefined;
-		try {
-			await client.stop();
-			addAgentActivity(activity, "agent runtime stopped after the resume grace period");
-		} catch (error) {
+		activity.reapPromise = client.stop().catch((error) => {
 			activity.error ??= error instanceof Error ? error.message : String(error);
-		}
+		}).finally(() => {
+			activity.reapPromise = undefined;
+			addAgentActivity(activity, "agent runtime released; saved session remains resumable");
+		});
+		await activity.reapPromise;
 	}
 
 	function scheduleAgentReap(activity: AgentActivity): void {
@@ -461,7 +505,7 @@ export default function background(pi: ExtensionAPI): void {
 		);
 	}
 
-	function observeAgent(activity: AgentActivity, event: JsonAgentSessionEvent): void {
+	function observeAgent(activity: AgentActivity, event: JsonAgentSessionEvent | { type: "extension_error"; error: string }): void {
 		switch (event.type) {
 			case "agent_start":
 				addAgentActivity(activity, "agent started a turn");
@@ -485,6 +529,7 @@ export default function background(pi: ExtensionAPI): void {
 					addAgentActivity(activity, "assistant produced an update");
 				}
 				if (info.error) activity.runError = info.error;
+				else if (info.text) activity.runError = undefined;
 				break;
 			}
 			case "extension_error":
@@ -495,7 +540,7 @@ export default function background(pi: ExtensionAPI): void {
 
 	async function finalizeAgent(activity: AgentActivity, runId: number): Promise<void> {
 		if (
-			activities.get(activity.id) !== activity ||
+			shuttingDown || activities.get(activity.id) !== activity ||
 			activity.runId !== runId ||
 			activity.notifiedRunId >= runId ||
 			activity.state !== "running"
@@ -503,6 +548,7 @@ export default function background(pi: ExtensionAPI): void {
 			return;
 		}
 		activity.notifiedRunId = runId;
+		clearAgentMonitor(activity);
 		// Release running capacity as soon as the child settles. Result and usage
 		// retrieval can take another RPC round trip and must not hold a slot.
 		activity.state = activity.runError ? "failed" : "completed";
@@ -548,13 +594,16 @@ export default function background(pi: ExtensionAPI): void {
 				content:
 					`Background agent ${activity.id} (${activity.name}) ${activity.state} after ${elapsed(activity.startedAt, activity.endedAt)}.\n` +
 					`Result:\n${result.content || "(no output)"}${suffix}${usage}\n` +
-					`The result is retained automatically; no collection or cleanup call is required.`,
+					`Session: ${activity.sessionFile}\nResume with background_send using this ID or session file. ` +
+					`No collection or cleanup call is required.`,
 				display: true,
 				details: {
 					id: activity.id,
 					kind: activity.kind,
 					event: "completion",
 					state: activity.state,
+					sessionId: activity.sessionId,
+					sessionFile: activity.sessionFile,
 					usage: activity.usage,
 				},
 			},
@@ -563,28 +612,86 @@ export default function background(pi: ExtensionAPI): void {
 	}
 
 	function monitorAgentRun(activity: AgentActivity, runId: number): void {
-		const client = activity.client;
-		if (!client) return;
-		void client.waitForIdle().then(
-			() => finalizeAgent(activity, runId),
-			(error) => {
-				if (activity.runId !== runId || activity.state !== "running") return;
-				activity.runError = error instanceof Error ? error.message : String(error);
-				void finalizeAgent(activity, runId);
-			},
-		);
+		clearAgentMonitor(activity);
+		if (activity.state !== "running") return;
+		let checking = false;
+		// Completion comes from agent_settled. Health checks detect crashed RPC
+		// processes without imposing RpcClient.waitForIdle's 60-second run limit.
+		activity.monitorTimer = setInterval(async () => {
+			if (checking || activity.runId !== runId || activity.state !== "running") return;
+			checking = true;
+			try { await refreshAgent(activity); } finally { checking = false; }
+		}, AGENT_HEALTH_CHECK_MS);
+		activity.monitorTimer.unref();
 	}
 
 	async function refreshAgent(activity: AgentActivity): Promise<void> {
-		if (activity.state !== "running" || !activity.client) return;
+		if (activity.state !== "running" || activity.starting || !activity.client) return;
+		const client = activity.client;
+		const runId = activity.runId;
 		try {
-			// Completion is event-driven through agent_settled/waitForIdle. A brief
-			// non-streaming gap can occur before a queued run starts, so get_state
-			// must not promote a running activity to completed by itself.
-			await activity.client.getState();
+			// A non-streaming gap can occur before a queued run starts. Only the
+			// settled event completes a run; get_state is a liveness check.
+			await client.getState();
 		} catch (error) {
+			if (activity.client !== client || activity.runId !== runId || activity.state !== "running") return;
 			activity.runError = error instanceof Error ? error.message : String(error);
-			await finalizeAgent(activity, activity.runId);
+			await finalizeAgent(activity, runId);
+			if (activity.client === client && activity.runId === runId) await reapAgentRuntime(activity);
+		}
+	}
+
+	async function startAgentRun(activity: AgentActivity, message: string): Promise<void> {
+		if (activity.starting || activity.state === "running") throw new Error(`${activity.id} is already starting or running.`);
+		if (running("agent").length >= MAX_RUNNING_AGENTS) {
+			throw new Error(`At most ${MAX_RUNNING_AGENTS} background agents may run at once.`);
+		}
+		if (activity.reapTimer) clearTimeout(activity.reapTimer);
+		activity.reapTimer = undefined;
+		const runId = ++activity.runId;
+		activity.state = "running";
+		activity.starting = true;
+		activity.endedAt = undefined;
+		activity.error = activity.runError = undefined;
+		activity.lastText = "";
+		try {
+			await activity.reapPromise;
+			if (shuttingDown || activity.runId !== runId) throw new Error("Parent stopped during child startup.");
+			if (activity.client) {
+				try { await activity.client.getState(); } catch { await reapAgentRuntime(activity); }
+			}
+			if (!activity.client) {
+				const client = new RpcClient({
+					cliPath: AGENT_RUNNER,
+					cwd: activity.cwd,
+					env: { PI_BACKGROUND_CLI_PATH: resolve(getPackageDir(), "dist", "cli.js") },
+					// Keep normal discovery. The saved session supplies its own model
+					// and thinking level, not the resumed parent's current model.
+					args: ["--session", activity.sessionFile, "--session-dir", dirname(activity.sessionFile)],
+				});
+				activity.client = client;
+				client.onEvent((event) => {
+					if (activity.client === client && !shuttingDown) observeAgent(activity, event);
+				});
+				await client.start();
+				const state = await client.getState();
+				if (state.sessionId !== activity.sessionId) throw new Error("Child opened a different session than requested.");
+			}
+			if (shuttingDown || activity.runId !== runId) throw new Error("Parent stopped during child startup.");
+			await activity.client.prompt(message);
+			activity.starting = false;
+			addAgentActivity(activity, "instruction accepted");
+			monitorAgentRun(activity, activity.runId);
+		} catch (error) {
+			activity.starting = false;
+			activity.state = "failed";
+			activity.error = error instanceof Error ? error.message : String(error);
+			activity.endedAt = activity.updatedAt = Date.now();
+			await reapAgentRuntime(activity);
+			pruneFinished();
+			throw new Error(`${activity.error}\nSaved session: ${activity.sessionFile}\nResume ${activity.id} with background_send.`);
+		} finally {
+			updateWidget();
 		}
 	}
 
@@ -593,7 +700,7 @@ export default function background(pi: ExtensionAPI): void {
 			activity.state === "running"
 				? elapsed(activity.startedAt)
 				: elapsed(activity.startedAt, activity.endedAt ?? activity.updatedAt);
-		const resumable = activity.kind === "agent" && activity.state !== "running" && activity.client ? ", resumable" : "";
+		const resumable = activity.kind === "agent" && activity.state !== "running" ? ", resumable" : "";
 		return `${activity.id} [${activity.kind}, ${activity.state}${resumable}, ${duration}] ${activity.name}`;
 	}
 
@@ -617,24 +724,24 @@ export default function background(pi: ExtensionAPI): void {
 				// The retained log may have been removed externally.
 			}
 		} else {
-			lines.push(`Task: ${activity.task}`);
+			lines.push(`Task: ${activity.task}`, `Session ID: ${activity.sessionId}`, `Session file: ${activity.sessionFile}`);
 			if (activity.activity.length > 0) lines.push("Recent activity:", ...activity.activity.map((item) => `- ${item}`));
 			if (activity.lastText) lines.push("Latest assistant text:", shorten(activity.lastText, STATUS_TEXT_LIMIT));
 			if (activity.usage) lines.push(`Usage: ${activity.usage.tokens.toLocaleString()} tokens, $${activity.usage.cost.toFixed(4)}`);
 			if (activity.state !== "running") {
 				lines.push(
 					activity.client
-						? "Resume: available temporarily with background_send"
-						: "Resume: grace period expired; start a new agent",
+						? "Resume: background_send (runtime is still loaded)"
+						: "Resume: background_send reopens the saved session; a live writer will block reopening",
 				);
 			}
 		}
 		return lines.join("\n");
 	}
 
-	async function listStatus(id?: string): Promise<string> {
+	async function listStatus(id?: string, ctx?: ExtensionContext): Promise<string> {
 		if (id) {
-			const activity = requireActivity(id);
+			const activity = requireActivity(id, ctx);
 			if (activity.kind === "agent") await refreshAgent(activity);
 			return detailedStatus(activity);
 		}
@@ -646,12 +753,13 @@ export default function background(pi: ExtensionAPI): void {
 		name: "background_start",
 		label: "Background Start",
 		description:
-			"Start a background shell command or steerable Pi agent. Returns immediately. Completion and result notices arrive automatically and wake the parent; finished activities release running capacity and are pruned automatically.",
+			"Start a background shell command or durable Pi agent. Returns immediately with an agent ID and saved session file. Completion notices wake the parent; finished activities release running capacity. Agent sessions survive runtime cleanup and parent restarts.",
 		promptSnippet: "Start long shell commands or delegated agents with automatic completion wake-up",
 		promptGuidelines: [
 			"Use background_start with kind=shell instead of bash for long-running commands such as test suites, builds, dev servers, and watchers.",
 			"Use background_start with kind=agent for independent delegated work that benefits from an isolated context. Start calls return immediately, and completion messages include results automatically; do not poll background_status or background_output merely to wait.",
 			"Finished background activities are retained and pruned automatically. Do not call background_forget as routine cleanup.",
+			"Use background_send with the saved agent ID or session file to resume a child after a crash, runtime cleanup, or parent restart; check for completed side effects before repeating interrupted work.",
 		],
 		parameters: StartParameters,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -747,48 +855,12 @@ export default function background(pi: ExtensionAPI): void {
 				throw new Error(`At most ${MAX_RUNNING_AGENTS} background agents may run at once.`);
 			}
 
-			const id = `agent-${nextAgentId++}`;
-			const client = new RpcClient({
-				cliPath: resolve(getPackageDir(), "dist", "cli.js"),
-				cwd,
-				provider: ctx.model.provider,
-				model: ctx.model.id,
-				// Keep normal resource discovery, including custom providers. Only
-				// disable persistence for the child's separate conversation.
-				args: ["--no-session"],
-			});
-			const activity: AgentActivity = {
-				id,
-				kind: "agent",
-				name: resolveName(params.name, task),
-				task,
-				cwd,
-				client,
-				state: "running",
-				startedAt: Date.now(),
-				updatedAt: Date.now(),
-				lastText: "",
-				activity: [],
-				runId: 1,
-				notifiedRunId: 0,
-			};
-			activities.set(id, activity);
-			client.onEvent((event) => observeAgent(activity, event));
-
-			try {
-				await client.start();
-				await client.setThinkingLevel(ctx.thinkingLevel);
-				await client.prompt(
-					`You are a background subagent. Complete this delegated task autonomously. ` +
-						`Keep changes scoped and finish with a concise report containing relevant file paths.\n\nTask: ${task}`,
-				);
-				addAgentActivity(activity, "task accepted");
-				monitorAgentRun(activity, activity.runId);
-			} catch (error) {
-				activities.delete(id);
-				await client.stop();
-				throw error;
-			}
+			const activity = restoreAgent(createSavedAgent(cwd, resolveName(params.name, task), task, ctx));
+			const id = activity.id;
+			// Record the durable reference before launching, so a parent crash
+			// before the tool result is written does not lose the child session.
+			rememberAgent(activity);
+			await startAgentRun(activity, "Begin the delegated task in the saved conversation.");
 
 			updateWidget();
 			return {
@@ -796,11 +868,13 @@ export default function background(pi: ExtensionAPI): void {
 					{
 						type: "text",
 						text:
-							`Started ${id} (${activity.name}). ` +
-							"Its completion notice will include the final result automatically; continue other work or end the turn.",
+							`Started ${id} (${activity.name}).\nSession: ${activity.sessionFile}\n` +
+							"Its completion notice will include the final result automatically. " +
+							"After a restart, use background_send with this ID or session file to resume.",
 					},
 				],
-				details: { id, kind: activity.kind, state: activity.state, name: activity.name, task, cwd },
+				details: { id, kind: activity.kind, state: activity.state, name: activity.name, task, cwd,
+					sessionId: activity.sessionId, sessionFile: activity.sessionFile },
 			};
 		},
 		renderCall(args, theme) {
@@ -822,8 +896,8 @@ export default function background(pi: ExtensionAPI): void {
 		label: "Background Status",
 		description: "Inspect one retained background activity or list all activities. Do not poll this tool merely to wait; completions arrive automatically.",
 		parameters: StatusParameters,
-		async execute(_toolCallId, params) {
-			const text = await listStatus(params.id);
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const text = await listStatus(params.id, ctx);
 			return { content: [{ type: "text", text }], details: { id: params.id, count: activities.size } };
 		},
 		renderCall(args, theme) {
@@ -840,8 +914,8 @@ export default function background(pi: ExtensionAPI): void {
 		label: "Background Output",
 		description: "Read retained shell logs or an agent's latest/final result without removing the activity.",
 		parameters: OutputParameters,
-		async execute(_toolCallId, params) {
-			const activity = requireActivity(params.id);
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const activity = requireActivity(params.id, ctx);
 			if (activity.kind === "shell") {
 				const maxLines = Math.min(Math.max(params.lines ?? OUTPUT_DEFAULT_LINES, 1), OUTPUT_MAX_LINES);
 				const { text } = readTail(activity.logPath, 0, OUTPUT_MAX_BYTES);
@@ -860,7 +934,8 @@ export default function background(pi: ExtensionAPI): void {
 			const suffix = result.truncated ? "\n[agent output truncated]" : "";
 			return {
 				content: [{ type: "text", text: `${result.content}${suffix}` }],
-				details: { id: activity.id, kind: activity.kind, state: activity.state, usage: activity.usage },
+				details: { id: activity.id, kind: activity.kind, state: activity.state, usage: activity.usage,
+					sessionId: activity.sessionId, sessionFile: activity.sessionFile },
 			};
 		},
 		renderCall(args, theme) {
@@ -875,47 +950,26 @@ export default function background(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "background_send",
 		label: "Background Send",
-		description: "Send a course correction to a running background agent or continue a finished agent during its resume grace period.",
+		description: "Steer a running background agent or resume its saved conversation, including after runtime cleanup, a crash, or a parent restart. Accepts an agent ID or saved session file.",
 		parameters: SendParameters,
-		async execute(_toolCallId, params) {
-			const activity = requireActivity(params.id);
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const activity = requireActivity(params.id, ctx);
 			if (activity.kind !== "agent") throw new Error(`${activity.id} is a shell activity and cannot receive messages.`);
 			const message = params.message.trim();
 			if (!message) throw new Error("background_send requires a non-empty message.");
-			const client = activity.client;
-			if (!client) throw new Error(`${activity.id}'s resume grace period expired. Start a new agent instead.`);
-
-			if (activity.state === "running") {
-				await client.steer(message);
+			if (activity.starting) throw new Error(`${activity.id} is still starting. Retry after startup completes.`);
+			await refreshAgent(activity);
+			if (activity.starting) throw new Error(`${activity.id} is still starting. Retry after startup completes.`);
+			if (activity.state === "running" && activity.client) {
+				await activity.client.steer(message);
 				addAgentActivity(activity, "steering instruction queued");
 			} else {
-				if (activity.reapTimer) {
-					clearTimeout(activity.reapTimer);
-					activity.reapTimer = undefined;
-				}
-				activity.runId++;
-				activity.state = "running";
-				activity.endedAt = undefined;
-				activity.error = undefined;
-				activity.runError = undefined;
-				activity.lastText = "";
-				try {
-					await client.prompt(message);
-					addAgentActivity(activity, "continuation accepted");
-					monitorAgentRun(activity, activity.runId);
-				} catch (error) {
-					activity.state = "failed";
-					activity.error = error instanceof Error ? error.message : String(error);
-					activity.endedAt = activity.updatedAt = Date.now();
-					scheduleAgentReap(activity);
-					pruneFinished();
-					throw error;
-				}
-				updateWidget();
+				await startAgentRun(activity, message);
 			}
 			return {
-				content: [{ type: "text", text: `${activity.id} accepted the instruction.` }],
-				details: { id: activity.id, kind: activity.kind, state: activity.state },
+				content: [{ type: "text", text: `${activity.id} accepted the instruction.\nSession: ${activity.sessionFile}` }],
+				details: { id: activity.id, kind: activity.kind, state: activity.state,
+					sessionId: activity.sessionId, sessionFile: activity.sessionFile },
 			};
 		},
 		renderCall(args, theme) {
@@ -932,8 +986,9 @@ export default function background(pi: ExtensionAPI): void {
 		label: "Background Stop",
 		description: "Cancel a running shell command or agent. Retained output remains available and is cleaned up automatically later.",
 		parameters: IdParameters,
-		async execute(_toolCallId, params) {
-			const activity = requireActivity(params.id);
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const activity = requireActivity(params.id, ctx);
+			if (activity.kind === "agent" && activity.starting) throw new Error(`${activity.id} is still starting. Retry after startup completes.`);
 			if (activity.state !== "running") throw new Error(`${activity.id} is not running (state: ${activity.state}).`);
 
 			if (activity.kind === "shell") {
@@ -947,6 +1002,7 @@ export default function background(pi: ExtensionAPI): void {
 				};
 			}
 
+			clearAgentMonitor(activity);
 			activity.state = "stopped";
 			activity.runId++;
 			activity.endedAt = activity.updatedAt = Date.now();
@@ -975,14 +1031,20 @@ export default function background(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "background_forget",
 		label: "Background Forget",
-		description: "Explicitly remove a finished activity and its retained output. Routine cleanup is automatic; use this only for immediate removal.",
+		description: "Untrack a finished activity. Shell logs are removed, but durable agent sessions remain on disk and can be reopened by session file. Routine cleanup is automatic.",
 		parameters: IdParameters,
-		async execute(_toolCallId, params) {
-			const activity = requireActivity(params.id);
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const activity = requireActivity(params.id, ctx);
 			if (activity.state === "running") throw new Error(`${activity.id} is still running. Stop it before forgetting it.`);
+			if (activity.kind === "agent") {
+				agentReferences.delete(activity.id);
+				pi.appendEntry(AGENT_FORGET_ENTRY, { id: activity.id });
+			}
 			await forgetActivity(activity);
 			return {
-				content: [{ type: "text", text: `Forgot ${activity.id} and removed its retained resources.` }],
+				content: [{ type: "text", text: activity.kind === "agent"
+					? `Untracked ${activity.id}. Saved session remains at ${activity.sessionFile}.`
+					: `Forgot ${activity.id} and removed its retained resources.` }],
 				details: { id: activity.id, kind: activity.kind, state: "forgotten" },
 			};
 		},
@@ -1014,13 +1076,28 @@ export default function background(pi: ExtensionAPI): void {
 		description: "List retained background shell commands and agents",
 		handler: async (_args, ctx) => {
 			ui ??= ctx.ui;
-			ctx.ui.notify(await listStatus(), "info");
+			ctx.ui.notify(await listStatus(undefined, ctx), "info");
 		},
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
 		ui = ctx.ui;
 		shuttingDown = false;
+		agentReferences.clear();
+		for (const entry of ctx.sessionManager.getBranch()) {
+			if (entry.type !== "custom") continue;
+			const data = entry.data as { id?: unknown; sessionFile?: unknown } | undefined;
+			if (typeof data?.id !== "string") continue;
+			if (entry.customType === AGENT_REFERENCE_ENTRY && typeof data.sessionFile === "string") {
+				agentReferences.set(data.id, data.sessionFile);
+			} else if (entry.customType === AGENT_FORGET_ENTRY) agentReferences.delete(data.id);
+		}
+		for (const [id, path] of [...agentReferences].slice(-MAX_FINISHED_KEPT)) {
+			if (activities.has(id)) continue;
+			try { restoreAgent(readSavedAgent(path)); } catch (error) {
+				ctx.ui.notify(`Could not restore ${id}: ${error instanceof Error ? error.message : String(error)}`, "warning");
+			}
+		}
 		updateWidget();
 	});
 
@@ -1041,11 +1118,10 @@ export default function background(pi: ExtensionAPI): void {
 					activity.stopRequested = true;
 					killProcessGroup(activity, "SIGKILL");
 				}
-			} else if (activity.client) {
-				const client = activity.client;
-				activity.client = undefined;
-				if (activity.reapTimer) clearTimeout(activity.reapTimer);
-				stops.push(client.stop());
+			} else {
+				activity.runId++;
+				activity.state = "stopped";
+				stops.push(reapAgentRuntime(activity));
 			}
 		}
 		await Promise.allSettled(stops);
