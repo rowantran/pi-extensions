@@ -10,7 +10,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import {
 	closeSync,
-	existsSync,
 	fstatSync,
 	mkdtempSync,
 	openSync,
@@ -22,7 +21,6 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
-	getAgentDir,
 	getPackageDir,
 	RpcClient,
 	truncateHead,
@@ -217,15 +215,6 @@ function addAgentActivity(activity: AgentActivity, text: string): void {
 	activity.activity.push(text);
 	if (activity.activity.length > MAX_ACTIVITY_ITEMS) activity.activity.shift();
 	activity.updatedAt = Date.now();
-}
-
-function childExtensionArgs(provider: string): string[] {
-	if (provider !== "isara") return [];
-	const providerExtension = join(getAgentDir(), "extensions", "isara-provider.ts");
-	if (!existsSync(providerExtension)) {
-		throw new Error(`Could not find the Isara provider extension at ${providerExtension}.`);
-	}
-	return ["--extension", providerExtension];
 }
 
 const StartParameters = Type.Object({
@@ -764,13 +753,9 @@ export default function background(pi: ExtensionAPI): void {
 				cwd,
 				provider: ctx.model.provider,
 				model: ctx.model.id,
-				args: [
-					"--no-session",
-					"--no-extensions",
-					...childExtensionArgs(ctx.model.provider),
-					"--no-skills",
-					"--no-prompt-templates",
-				],
+				// Keep normal resource discovery, including custom providers. Only
+				// disable persistence for the child's separate conversation.
+				args: ["--no-session"],
 			});
 			const activity: AgentActivity = {
 				id,
