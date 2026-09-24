@@ -6,6 +6,15 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 const AUTO_COMPACTION_RESERVE_TOKENS = 16_384;
 const LINE_INDENT = "  ";
 const SEPARATOR = " · ";
+// Extension statuses shown on the main line right after the model, instead of
+// on the status line below.
+const MODEL_STATUS_KEYS = ["isara-fast"];
+
+// Light red. Themes have no light red color, so use a fixed color.
+function lightRed(theme: Theme, text: string): string {
+	const color = theme.getColorMode() === "truecolor" ? "\x1b[38;2;255;135;135m" : "\x1b[38;5;210m";
+	return `${color}${text}\x1b[39m`;
+}
 
 function formatTokens(count: number): string {
 	if (count < 1_000) {
@@ -138,8 +147,13 @@ export default function codexFooter(pi: ExtensionAPI): void {
 					const contextMax = contextWindow ? ` (${formatTokens(contextWindow)} ctx)` : "";
 					const branch = footerData.getGitBranch();
 					const workspace = branch ? `${formatCwd(ctx.cwd)} (${branch})` : formatCwd(ctx.cwd);
+					const extensionStatuses = footerData.getExtensionStatuses();
+					const modelStatuses = MODEL_STATUS_KEYS.map((key) => sanitizeStatus(extensionStatuses.get(key) ?? ""))
+						.filter(Boolean)
+						.map((text) => lightRed(theme, text));
 					const mainSegments = [
 						theme.fg("warning", `${providerPrefix}${modelName}${thinking}${contextMax}`),
+						...modelStatuses,
 						contextSegment(theme, contextUsage),
 						theme.fg("success", workspace),
 					];
@@ -163,7 +177,8 @@ export default function codexFooter(pi: ExtensionAPI): void {
 						otherSegments.push(theme.bold(theme.fg("warning", "xp")));
 					}
 
-					const statuses = Array.from(footerData.getExtensionStatuses().entries())
+					const statuses = Array.from(extensionStatuses.entries())
+						.filter(([key]) => !MODEL_STATUS_KEYS.includes(key))
 						.sort(([left], [right]) => left.localeCompare(right))
 						.map(([, text]) => sanitizeStatus(text))
 						.filter(Boolean);
