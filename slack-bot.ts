@@ -1,16 +1,12 @@
-import { execFile } from "node:child_process";
-import { homedir } from "node:os";
-import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { getBotToken } from "./slack-bot/token.ts";
 
-const KEYCHAIN_SERVICE = "pi-slack-bot-token";
 // Known channel name -> ID mappings, resolved locally to avoid rate-limited
 // conversations.list calls (which return HTTP 429 fairly often).
 const KNOWN_CHANNELS: Record<string, string> = {
 	"rowan-log": "C0ACK1LAFDH",
 };
-const LOGIN_KEYCHAIN = join(homedir(), "Library/Keychains/login.keychain-db");
 const SLACK_API_BASE = "https://slack.com/api/";
 
 interface SlackResponse {
@@ -26,56 +22,6 @@ interface SlackChannel {
 	is_member?: boolean;
 	is_private?: boolean;
 	is_archived?: boolean;
-}
-
-function getBotToken(signal?: AbortSignal): Promise<string> {
-	return new Promise((resolve, reject) => {
-		let settled = false;
-		const finish = (error?: Error, token?: string) => {
-			if (settled) return;
-			settled = true;
-			signal?.removeEventListener("abort", onAbort);
-			if (error) reject(error);
-			else resolve(token ?? "");
-		};
-
-		const child = execFile(
-			"/usr/bin/security",
-			[
-				"find-generic-password",
-				"-s",
-				KEYCHAIN_SERVICE,
-				"-w",
-				LOGIN_KEYCHAIN,
-			],
-			{ encoding: "utf8", timeout: 120_000, maxBuffer: 64 * 1024 },
-			(error, stdout) => {
-				if (error) {
-					finish(
-						new Error(
-							`Could not retrieve the Slack bot token from the macOS login Keychain. ` +
-							`Approve the Keychain prompt and confirm that service ${KEYCHAIN_SERVICE} exists.`,
-						),
-					);
-					return;
-				}
-
-				const token = stdout.trim();
-				if (!token) {
-					finish(new Error("The Slack bot token Keychain item is empty."));
-					return;
-				}
-				finish(undefined, token);
-			},
-		);
-
-		const onAbort = () => {
-			child.kill();
-			finish(new Error("Slack operation cancelled."));
-		};
-		if (signal?.aborted) onAbort();
-		else signal?.addEventListener("abort", onAbort, { once: true });
-	});
 }
 
 async function slackApi<T extends SlackResponse>(
@@ -158,7 +104,7 @@ export default function slackBotExtension(pi: ExtensionAPI) {
 		name: "slack_bot_send_message",
 		label: "Slack Bot: Send Message",
 		description:
-			"Send a Slack message as the walle_rowanbot bot through Slack Web API, using the bot token stored in the macOS Keychain. Use this instead of Slack MCP for all Slack message sending.",
+			"Send a Slack message as the walle_rowanbot bot through Slack Web API, using the bot token stored in the OS credential store (macOS Keychain or Linux Secret Service). Use this instead of Slack MCP for all Slack message sending.",
 		promptSnippet: "Send Slack messages as walle_rowanbot through the Slack Web API",
 		promptGuidelines: [
 			"Use slack_bot_send_message whenever the user asks to send or post a Slack message; never use Slack MCP to send messages.",
@@ -211,7 +157,7 @@ export default function slackBotExtension(pi: ExtensionAPI) {
 		name: "slack_bot_list_channels",
 		label: "Slack Bot: List Channels",
 		description:
-			"List active Slack channels that walle_rowanbot has joined, using its bot token from the macOS Keychain and the Slack Web API.",
+			"List active Slack channels that walle_rowanbot has joined, using its bot token from the OS credential store and the Slack Web API.",
 		parameters: Type.Object({}),
 		async execute(_toolCallId, _params, signal) {
 			const token = await getBotToken(signal);

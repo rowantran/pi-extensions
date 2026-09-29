@@ -73,6 +73,21 @@ not have complete records. Check files or external systems before repeating a
 side effect. Session persistence is not an exactly-once execution or power-loss
 durability guarantee.
 
+## Slack bot
+
+`slack_bot_send_message` and `slack_bot_list_channels` call the Slack Web API
+as the bot user. They read the bot token (`xoxb-...`) from the OS credential store under
+the service name `pi-slack-bot-token`:
+
+- **macOS:** login Keychain. Store the token with
+  `security add-generic-password -s pi-slack-bot-token -a "$USER" -w`, and
+  approve the Keychain prompt the first time Pi reads it.
+- **Linux:** Secret Service (libsecret), keyed by service and account (your
+  username). Store the token with
+  `secret-tool store --label='Slack bot token' service pi-slack-bot-token account "$USER"`.
+
+Both commands prompt for the token, so it does not appear in shell history.
+
 ## Tests
 
 With dependencies installed, run `npm test` (Node.js 22.19 or newer). The tests
