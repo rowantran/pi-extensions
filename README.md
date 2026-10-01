@@ -19,6 +19,23 @@ outside `~/.pi/agent/extensions` to prevent duplicate extension loading.
 
 The machine-local Isara provider is intentionally excluded from this repository.
 
+## Compact codemode
+
+`codemode-compact.ts` registers Pi's `codemode` tool with the same compact tree
+as the other tools. Each nested tool call is one row, drawn like a direct call
+(`Read(...)`, `Bash(...)`), followed by the script's outcome. Ctrl+O adds the
+error details and the full output; alt+o adds the original script. The heading
+uses the script's first `// comment` line, and a prompt guideline asks the model
+to write one.
+
+Pi skips its replaceable built-in `codemode` extension when this one registers
+the tool, and it prints a warning at startup. To remove the warning, disable the
+built-in in `~/.pi/agent/settings.json`:
+
+```json
+{ "extensions": ["-builtin:codemode"] }
+```
+
 ## Background agents
 
 Background agents run Pi in RPC mode with a separate, saved conversation. New

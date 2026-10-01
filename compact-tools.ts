@@ -35,7 +35,7 @@ type RenderContext = ToolStatus & {
 	invalidate: () => void;
 };
 
-type CompactStatus = "running" | "success" | "error";
+export type CompactStatus = "running" | "success" | "error";
 
 interface CompactState {
 	status: CompactStatus;
@@ -47,16 +47,16 @@ interface Summary {
 	styled?: boolean;
 }
 
-function shortenPath(path: string): string {
+export function shortenPath(path: string): string {
 	const home = homedir();
 	return path.startsWith(home) ? `~${path.slice(home.length)}` : path;
 }
 
-function collapseWhitespace(value: string): string {
+export function collapseWhitespace(value: string): string {
 	return value.replace(/\s+/g, " ").trim();
 }
 
-function textOutput(result: AgentToolResult<unknown>): string {
+export function textOutput(result: AgentToolResult<unknown>): string {
 	return result.content
 		.filter((block) => block.type === "text")
 		.map((block) => block.text)
@@ -68,14 +68,14 @@ function nonEmptyLines(value: string): number {
 	return value ? value.split("\n").filter((line) => line.length > 0).length : 0;
 }
 
-function firstOutputLine(value: string, fallback: string): string {
+export function firstOutputLine(value: string, fallback: string): string {
 	return value
 		.split("\n")
 		.map(collapseWhitespace)
 		.find(Boolean) ?? fallback;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
+export function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
@@ -128,6 +128,22 @@ function customToolHeading(toolName: string, args: unknown): ToolCallHeading {
 	}
 
 	const values = args;
+	// Pi's built-in MCP support names each tool `mcp__<server>__<tool>` and passes its arguments directly.
+	const builtInMcp = /^mcp__(.+?)__(.+)$/.exec(toolName);
+	if (builtInMcp) {
+		return {
+			name: "mcp",
+			detail: "",
+			expandedArgs: args,
+			isMcpCall: true,
+			mcp: {
+				server: builtInMcp[1],
+				tool: builtInMcp[2],
+				argumentPreview: Object.keys(values).length > 0 ? summarizeMcpPayload(values) : "",
+			},
+		};
+	}
+
 	const namespaceServer = toolName.startsWith("mcp__") ? toolName.slice("mcp__".length) : undefined;
 	if (toolName === "mcp" || namespaceServer) {
 		if (typeof values.tool === "string" && values.tool) {
@@ -253,12 +269,13 @@ function status(context: ToolStatus, output = ""): CompactStatus {
 	return "success";
 }
 
-function branch(theme: Theme, value: string, toolStatus: CompactStatus): string {
+export function branch(theme: Theme, value: string, toolStatus: CompactStatus): string {
 	const color = toolStatus === "success" ? "success" : toolStatus === "error" ? "error" : "dim";
 	return theme.fg(color, value);
 }
 
-function toolHeading(theme: Theme, name: string, detail: string): string {
+export function toolHeading(theme: Theme, name: string, detail: string): string {
+	if (!detail) return theme.fg("toolTitle", theme.bold(name));
 	return (
 		theme.fg("toolTitle", theme.bold(name)) +
 		theme.fg("dim", "(") +
@@ -269,10 +286,12 @@ function toolHeading(theme: Theme, name: string, detail: string): string {
 
 type DisplayValue = string | (() => string);
 
-interface DisplayRow {
+export interface DisplayRow {
 	prefix: DisplayValue;
 	continuation?: DisplayValue;
 	content: DisplayValue;
+	/** Cut the content to one terminal row instead of wrapping it. */
+	truncate?: boolean;
 }
 
 function displayValue(value: DisplayValue): string {
@@ -280,6 +299,42 @@ function displayValue(value: DisplayValue): string {
 }
 
 /** Render framed rows with the same margin, wrapping, and persistent guide as the reference config. */
+export function renderRows(rows: DisplayRow[], width: number): string[] {
+	const horizontalPad = Math.min(2, Math.max(0, width - 1));
+	const innerWidth = Math.max(1, width - horizontalPad * 2);
+	const rendered: string[] = [];
+
+	for (const row of rows) {
+		const prefix = displayValue(row.prefix);
+		const content = displayValue(row.content);
+		const continuation = displayValue(row.continuation ?? " ".repeat(visibleWidth(prefix)));
+		const prefixWidth = Math.max(visibleWidth(prefix), visibleWidth(continuation));
+		const contentWidth = Math.max(1, innerWidth - prefixWidth);
+
+		if (row.truncate) {
+			rendered.push(
+				truncateToWidth(
+					" ".repeat(horizontalPad) + prefix + truncateToWidth(content, contentWidth, "…"),
+					width,
+					"",
+				),
+			);
+			continue;
+		}
+
+		const wrapped = wrapTextWithAnsi(content || " ", contentWidth);
+		rendered.push(
+			truncateToWidth(" ".repeat(horizontalPad) + prefix + (wrapped[0] ?? ""), width, ""),
+		);
+		for (const line of wrapped.slice(1)) {
+			rendered.push(
+				truncateToWidth(" ".repeat(horizontalPad) + continuation + line, width, ""),
+			);
+		}
+	}
+	return rendered;
+}
+
 function block(rows: DisplayRow[]): Component {
 	let cachedWidth: number | undefined;
 	let cachedLines: string[] | undefined;
@@ -287,32 +342,9 @@ function block(rows: DisplayRow[]): Component {
 	return {
 		render(width: number): string[] {
 			if (cachedWidth === width && cachedLines) return cachedLines;
-
-			const horizontalPad = Math.min(2, Math.max(0, width - 1));
-			const innerWidth = Math.max(1, width - horizontalPad * 2);
-			const rendered: string[] = [];
-
-			for (const row of rows) {
-				const prefix = displayValue(row.prefix);
-				const content = displayValue(row.content);
-				const continuation = displayValue(row.continuation ?? " ".repeat(visibleWidth(prefix)));
-				const prefixWidth = Math.max(visibleWidth(prefix), visibleWidth(continuation));
-				const contentWidth = Math.max(1, innerWidth - prefixWidth);
-				const wrapped = wrapTextWithAnsi(content || " ", contentWidth);
-
-				rendered.push(
-					truncateToWidth(" ".repeat(horizontalPad) + prefix + (wrapped[0] ?? ""), width, ""),
-				);
-				for (const line of wrapped.slice(1)) {
-					rendered.push(
-						truncateToWidth(" ".repeat(horizontalPad) + continuation + line, width, ""),
-					);
-				}
-			}
-
 			cachedWidth = width;
-			cachedLines = rendered;
-			return rendered;
+			cachedLines = renderRows(rows, width);
+			return cachedLines;
 		},
 		invalidate(): void {
 			cachedWidth = undefined;
@@ -344,7 +376,7 @@ type CompactRenderingGlobal = typeof globalThis & {
 	__piExtensionsCompactRendering?: CompactRenderingState;
 };
 
-function compactRenderingState(): CompactRenderingState {
+export function compactRenderingState(): CompactRenderingState {
 	const sharedGlobal = globalThis as CompactRenderingGlobal;
 	sharedGlobal.__piExtensionsCompactRendering ??= {
 		showFullToolCall: false,
@@ -491,6 +523,74 @@ function summarizeCustomToolArguments(args: unknown): string {
 	}
 }
 
+interface PlainHeading {
+	name: string;
+	detail: string;
+}
+
+function plural(count: number, noun: string): string {
+	return `${count} ${count === 1 ? noun : `${noun}s`}`;
+}
+
+/** Title and argument summary of each built-in tool, shared by direct calls and codemode's nested calls. */
+const builtInHeadings = {
+	read(args: any): PlainHeading {
+		const path = shortenPath(args.path || "...");
+		const range = args.offset || args.limit
+			? ` · lines ${args.offset ?? 1}${args.limit ? `–${(args.offset ?? 1) + args.limit - 1}` : "+"}`
+			: "";
+		return { name: "Read", detail: `${path}${range}` };
+	},
+	bash(args: any): PlainHeading {
+		return { name: "Bash", detail: collapseWhitespace(args.command || "...") };
+	},
+	edit(args: any): PlainHeading {
+		const count = Array.isArray(args.edits) ? args.edits.length : 0;
+		const suffix = count > 0 ? ` · ${plural(count, "change")}` : "";
+		return { name: "Edit", detail: `${shortenPath(args.path || "...")}${suffix}` };
+	},
+	write(args: any): PlainHeading {
+		const lines = typeof args.content === "string" && args.content ? args.content.split("\n").length : 0;
+		const suffix = lines > 0 ? ` · ${plural(lines, "line")}` : "";
+		return { name: "Write", detail: `${shortenPath(args.path || "...")}${suffix}` };
+	},
+	find(args: any): PlainHeading {
+		const where = args.path ? ` · ${shortenPath(args.path)}` : "";
+		return { name: "Find", detail: `${args.pattern || "..."}${where}` };
+	},
+	grep(args: any): PlainHeading {
+		const where = args.path ? ` · ${shortenPath(args.path)}` : "";
+		const glob = args.glob ? ` · ${args.glob}` : "";
+		return { name: "Grep", detail: `${collapseWhitespace(args.pattern || "...")}${where}${glob}` };
+	},
+	ls(args: any): PlainHeading {
+		return { name: "List", detail: shortenPath(args.path || ".") };
+	},
+};
+
+type BuiltInToolName = keyof typeof builtInHeadings;
+
+function isBuiltInToolName(name: string): name is BuiltInToolName {
+	return Object.hasOwn(builtInHeadings, name);
+}
+
+/** Styled heading for any tool call, e.g. `Read(~/x.ts)` or `mcp · server / tool (…)`. */
+export function callHeading(theme: Theme, toolName: string, args: unknown): string {
+	if (isBuiltInToolName(toolName)) {
+		const heading = builtInHeadings[toolName](isRecord(args) ? args : {});
+		return toolHeading(theme, heading.name, heading.detail);
+	}
+	const heading = customToolHeading(toolName, args);
+	return renderCustomToolHeading(theme, heading) ?? toolHeading(theme, heading.name, heading.detail);
+}
+
+function builtInRenderCall(toolName: BuiltInToolName) {
+	return (args: any, theme: Theme, context: unknown): Component => {
+		const heading = builtInHeadings[toolName](args ?? {});
+		return compactCall(theme, heading.name, heading.detail, args, context as RenderContext);
+	};
+}
+
 function compactCustomTool(
 	tool: ToolDefinition<any, any, any>,
 ): ToolDefinition<any, any, any> {
@@ -602,13 +702,7 @@ export default function compactTools(pi: ExtensionAPI): void {
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
 			return getBuiltInTools(ctx.cwd).read.execute(toolCallId, params, signal, onUpdate, ctx);
 		},
-		renderCall(args, theme, context) {
-			const path = shortenPath(args.path || "...");
-			const range = args.offset || args.limit
-				? ` · lines ${args.offset ?? 1}${args.limit ? `–${(args.offset ?? 1) + args.limit - 1}` : "+"}`
-				: "";
-			return compactCall(theme, "Read", `${path}${range}`, args, context as RenderContext);
-		},
+		renderCall: builtInRenderCall("read"),
 		renderResult(result, options, theme, context) {
 			const image = result.content.find((item) => item.type === "image");
 			return compactResult(
@@ -634,15 +728,7 @@ export default function compactTools(pi: ExtensionAPI): void {
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
 			return getBuiltInTools(ctx.cwd).bash.execute(toolCallId, params, signal, onUpdate, ctx);
 		},
-		renderCall(args, theme, context) {
-			return compactCall(
-				theme,
-				"Bash",
-				collapseWhitespace(args.command || "..."),
-				args,
-				context as RenderContext,
-			);
-		},
+		renderCall: builtInRenderCall("bash"),
 		renderResult(result, options, theme, context) {
 			return compactResult(
 				result,
@@ -663,12 +749,7 @@ export default function compactTools(pi: ExtensionAPI): void {
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
 			return getBuiltInTools(ctx.cwd).edit.execute(toolCallId, params, signal, onUpdate, ctx);
 		},
-		renderCall(args, theme, context) {
-			const path = shortenPath(args.path || "...");
-			const count = args.edits?.length ?? 0;
-			const suffix = count > 0 ? ` · ${count} ${count === 1 ? "change" : "changes"}` : "";
-			return compactCall(theme, "Edit", `${path}${suffix}`, args, context as RenderContext);
-		},
+		renderCall: builtInRenderCall("edit"),
 		renderResult(result, options, theme, context) {
 			const output = textOutput(result);
 			const diff = (result.details as any)?.diff ?? "";
@@ -715,12 +796,7 @@ export default function compactTools(pi: ExtensionAPI): void {
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
 			return getBuiltInTools(ctx.cwd).write.execute(toolCallId, params, signal, onUpdate, ctx);
 		},
-		renderCall(args, theme, context) {
-			const path = shortenPath(args.path || "...");
-			const lines = args.content ? args.content.split("\n").length : 0;
-			const suffix = lines > 0 ? ` · ${lines} ${lines === 1 ? "line" : "lines"}` : "";
-			return compactCall(theme, "Write", `${path}${suffix}`, args, context as RenderContext);
-		},
+		renderCall: builtInRenderCall("write"),
 		renderResult(result, options, theme, context) {
 			return compactResult(
 				result,
@@ -739,16 +815,7 @@ export default function compactTools(pi: ExtensionAPI): void {
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
 			return getBuiltInTools(ctx.cwd).find.execute(toolCallId, params, signal, onUpdate, ctx);
 		},
-		renderCall(args, theme, context) {
-			const path = shortenPath(args.path || ".");
-			return compactCall(
-				theme,
-				"Find",
-				`${args.pattern || "..."}${args.path ? ` · ${path}` : ""}`,
-				args,
-				context as RenderContext,
-			);
-		},
+		renderCall: builtInRenderCall("find"),
 		renderResult(result, options, theme, context) {
 			return compactResult(
 				result,
@@ -769,18 +836,7 @@ export default function compactTools(pi: ExtensionAPI): void {
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
 			return getBuiltInTools(ctx.cwd).grep.execute(toolCallId, params, signal, onUpdate, ctx);
 		},
-		renderCall(args, theme, context) {
-			const path = shortenPath(args.path || ".");
-			const where = args.path ? ` · ${path}` : "";
-			const glob = args.glob ? ` · ${args.glob}` : "";
-			return compactCall(
-				theme,
-				"Grep",
-				`${collapseWhitespace(args.pattern || "...")}${where}${glob}`,
-				args,
-				context as RenderContext,
-			);
-		},
+		renderCall: builtInRenderCall("grep"),
 		renderResult(result, options, theme, context) {
 			return compactResult(
 				result,
@@ -801,10 +857,7 @@ export default function compactTools(pi: ExtensionAPI): void {
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
 			return getBuiltInTools(ctx.cwd).ls.execute(toolCallId, params, signal, onUpdate, ctx);
 		},
-		renderCall(args, theme, context) {
-			const path = shortenPath(args.path || ".");
-			return compactCall(theme, "List", path, args, context as RenderContext);
-		},
+		renderCall: builtInRenderCall("ls"),
 		renderResult(result, options, theme, context) {
 			return compactResult(
 				result,
