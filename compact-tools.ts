@@ -40,11 +40,14 @@ export type CompactStatus = "running" | "success" | "error";
 interface CompactState {
 	status: CompactStatus;
 	summary: string;
+	hiddenLines: number;
 }
 
 interface Summary {
 	text: string;
 	styled?: boolean;
+	/** Output lines after the one the summary shows, displayed as `(+ N lines)` while collapsed. */
+	hiddenLines?: number;
 }
 
 export function shortenPath(path: string): string {
@@ -73,6 +76,23 @@ export function firstOutputLine(value: string, fallback: string): string {
 		.split("\n")
 		.map(collapseWhitespace)
 		.find(Boolean) ?? fallback;
+}
+
+/** Summarize output by its first non-empty line and count the lines after it. */
+export function firstLineSummary(value: string, fallback: string): Summary {
+	const lines = value.split("\n");
+	const index = lines.findIndex((line) => collapseWhitespace(line));
+	if (index < 0) return { text: fallback };
+	return { text: collapseWhitespace(lines[index]!), hiddenLines: lines.length - index - 1 };
+}
+
+/** The `(+ N lines)` row under a collapsed summary, aligned with the summary text. */
+export function hiddenLinesRow(theme: Theme, count: number): DisplayRow {
+	return {
+		prefix: "   ",
+		content: theme.fg("muted", `(+ ${count} ${count === 1 ? "line" : "lines"})`),
+		truncate: true,
+	};
 }
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
@@ -240,7 +260,7 @@ function renderCustomToolHeading(theme: Theme, heading: ToolCallHeading): string
 }
 
 function summarizeMcpOutput(output: string, failed: boolean): Summary {
-	if (failed) return { text: firstOutputLine(output, "Failed") };
+	if (failed) return firstLineSummary(output, "Failed");
 
 	const trimmed = output.trim();
 	if (!trimmed) return { text: "Completed" };
@@ -253,13 +273,14 @@ function summarizeMcpOutput(output: string, failed: boolean): Summary {
 	} catch {
 		if (/^[{[]/.test(trimmed)) return { text: "Returned JSON" };
 	}
-	return { text: firstOutputLine(output, "Completed") };
+	return firstLineSummary(output, "Completed");
 }
 
 function compactState(context: RenderContext): CompactState {
 	const state = context.state as Partial<CompactState>;
 	state.status ??= "running";
 	state.summary ??= "";
+	state.hiddenLines ??= 0;
 	return state as CompactState;
 }
 
@@ -353,16 +374,10 @@ function block(rows: DisplayRow[]): Component {
 	};
 }
 
-/** Keep the normal view to exactly one terminal row, even when arguments or output are long. */
-function collapsedLine(getText: () => string): Component {
+/** Rows computed at render time, so they follow state that the result renderer updates later. */
+function lazyRows(getRows: () => DisplayRow[]): Component {
 	return {
-		render(width: number): string[] {
-			const horizontalPad = Math.min(2, Math.max(0, width - 1));
-			return [
-				" ".repeat(horizontalPad) +
-					truncateToWidth(getText(), Math.max(1, width - horizontalPad), "…"),
-			];
-		},
+		render: (width: number) => renderRows(getRows(), width),
 		invalidate(): void {},
 	};
 }
@@ -402,13 +417,19 @@ function compactCall(
 	}
 	const heading = headingOverride ?? toolHeading(theme, name, detail);
 
+	const hiddenRows = (): DisplayRow[] =>
+		state.hiddenLines > 0 ? [hiddenLinesRow(theme, state.hiddenLines)] : [];
+
+	// The normal view is one terminal row, plus `(+ N lines)` when the summary leaves output out.
 	if (!context.expanded && !renderingState.showFullToolCall) {
-		return collapsedLine(() => {
-			const output = state.summary
-				? theme.fg("dim", " ── ") + state.summary
-				: "";
-			return branch(theme, "├─ ", state.status) + heading + output;
-		});
+		return lazyRows(() => [
+			{
+				prefix: branch(theme, "├─ ", state.status),
+				content: heading + (state.summary ? theme.fg("dim", " ── ") + state.summary : ""),
+				truncate: true,
+			},
+			...hiddenRows(),
+		]);
 	}
 
 	const rows: DisplayRow[] = [
@@ -430,15 +451,16 @@ function compactCall(
 		}
 	}
 
-	if (!context.expanded) {
-		rows.push({
+	if (context.expanded) return block(rows);
+	return lazyRows(() => [
+		...rows,
+		{
 			prefix: theme.fg("dim", "└─ "),
 			continuation: "   ",
 			content: () => state.summary || theme.fg("toolOutput", "Ready"),
-		});
-	}
-
-	return block(rows);
+		},
+		...hiddenRows(),
+	]);
 }
 
 function compactResult(
@@ -463,16 +485,19 @@ function compactResult(
 	state.summary = summary.styled
 		? summary.text
 		: theme.fg(failed ? "error" : "toolOutput", summary.text);
+	state.hiddenLines = summary.hiddenLines ?? 0;
 
 	if (!options.expanded) return new Container();
 
 	const lines = output ? output.split("\n") : [];
+	// Skip the line the summary already shows, and any blank lines before it.
+	const first = lines.findIndex((line) => collapseWhitespace(line));
 	if (
 		!summary.styled &&
-		lines[0] &&
-		collapseWhitespace(lines[0]) === collapseWhitespace(summary.text)
+		first >= 0 &&
+		collapseWhitespace(lines[first]!) === collapseWhitespace(summary.text)
 	) {
-		lines.shift();
+		lines.splice(0, first + 1);
 	}
 	const rows: DisplayRow[] = [
 		{
@@ -618,9 +643,7 @@ function compactCustomTool(
 				"Working…",
 				heading.isMcpCall
 					? summarizeMcpOutput
-					: (output, failed) => ({
-						text: failed ? firstOutputLine(output, "Failed") : firstOutputLine(output, "Completed"),
-					}),
+					: (output, failed) => firstLineSummary(output, failed ? "Failed" : "Completed"),
 			);
 		},
 	};
@@ -712,7 +735,7 @@ export default function compactTools(pi: ExtensionAPI): void {
 				context as RenderContext,
 				"Reading…",
 				(output, failed) => {
-					if (failed) return { text: firstOutputLine(output, "Read failed") };
+					if (failed) return firstLineSummary(output, "Read failed");
 					if (image) return { text: "Read image" };
 					const lines = nonEmptyLines(output);
 					const truncated = (result.details as any)?.truncation?.truncated ? " · truncated" : "";
@@ -736,9 +759,7 @@ export default function compactTools(pi: ExtensionAPI): void {
 				theme,
 				context as RenderContext,
 				"Running…",
-				(output, failed) => ({
-					text: failed ? firstOutputLine(output, "Command failed") : firstOutputLine(output, "Completed"),
-				}),
+				(output, failed) => firstLineSummary(output, failed ? "Command failed" : "Completed"),
 			);
 		},
 	});
@@ -768,7 +789,7 @@ export default function compactTools(pi: ExtensionAPI): void {
 				context as RenderContext,
 				"Editing…",
 				(_raw, failed) => failed
-					? { text: firstOutputLine(output, "Edit failed") }
+					? firstLineSummary(output, "Edit failed")
 					: diff
 						? {
 							text:
@@ -804,7 +825,7 @@ export default function compactTools(pi: ExtensionAPI): void {
 				theme,
 				context as RenderContext,
 				"Writing…",
-				(output, failed) => ({ text: failed ? firstOutputLine(output, "Write failed") : "Written" }),
+				(output, failed) => (failed ? firstLineSummary(output, "Write failed") : { text: "Written" }),
 			);
 		},
 	});
@@ -823,9 +844,9 @@ export default function compactTools(pi: ExtensionAPI): void {
 				theme,
 				context as RenderContext,
 				"Searching…",
-				(output, failed) => ({
-					text: failed ? firstOutputLine(output, "Find failed") : `Found ${nonEmptyLines(output)} paths`,
-				}),
+				(output, failed) => failed
+					? firstLineSummary(output, "Find failed")
+					: { text: `Found ${nonEmptyLines(output)} paths` },
 			);
 		},
 	});
@@ -844,9 +865,9 @@ export default function compactTools(pi: ExtensionAPI): void {
 				theme,
 				context as RenderContext,
 				"Searching…",
-				(output, failed) => ({
-					text: failed ? firstOutputLine(output, "Grep failed") : `Found ${nonEmptyLines(output)} matches`,
-				}),
+				(output, failed) => failed
+					? firstLineSummary(output, "Grep failed")
+					: { text: `Found ${nonEmptyLines(output)} matches` },
 			);
 		},
 	});
@@ -865,9 +886,9 @@ export default function compactTools(pi: ExtensionAPI): void {
 				theme,
 				context as RenderContext,
 				"Listing…",
-				(output, failed) => ({
-					text: failed ? firstOutputLine(output, "List failed") : `Listed ${nonEmptyLines(output)} entries`,
-				}),
+				(output, failed) => failed
+					? firstLineSummary(output, "List failed")
+					: { text: `Listed ${nonEmptyLines(output)} entries` },
 			);
 		},
 	});

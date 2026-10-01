@@ -80,9 +80,9 @@ test("cut-off argument previews keep their readable fields", () => {
 	assert.deepEqual(parseNestedArgs(""), {});
 });
 
-test("streaming without calls stays on one row", () => {
+test("streaming without calls shows the heading and outcome rows", () => {
 	const view = createView();
-	assert.deepEqual(view.lines(), ["  ├─ Codemode(find the renderer) ── Running…"]);
+	assert.deepEqual(view.lines(), ["  ┌─ Codemode(find the renderer)", "  └─ Running…"]);
 });
 
 test("collapsed view lists nested calls like direct tool calls", () => {
@@ -94,6 +94,7 @@ test("collapsed view lists nested calls like direct tool calls", () => {
 		"  │  ├─ Read(~/x.ts · lines 10–14) ── 3ms",
 		"  │  └─ Grep(codemode · /missing) ── No such directory",
 		"  └─ a.ts · 1 failed · 1.4s",
+		"     (+ 1 line)",
 	]);
 });
 
@@ -146,7 +147,7 @@ test("expanded view adds error details and the output", () => {
 		"  │  ├─ Read(~/x.ts · lines 10–14) ── 3ms",
 		"  │  └─ Grep(codemode · /missing) ── No such directory",
 		"  │     second line",
-		"  │  a.ts · 1 failed · 1.4s · truncated",
+		"  │  a.ts · 1 failed · 1.4s · output capped",
 		"  │  b.ts",
 		"  └─ Full output: /tmp/out.txt",
 	]);
@@ -161,7 +162,11 @@ test("failed scripts summarize the script error", () => {
 		},
 		{ isError: true },
 	);
-	assert.deepEqual(view.lines(), ["  ├─ Codemode(find the renderer) ── TypeError: boom · 1.4s"]);
+	assert.deepEqual(view.lines(), [
+		"  ┌─ Codemode(find the renderer)",
+		"  └─ TypeError: boom · 1.4s",
+		"     (+ 3 lines)",
+	]);
 });
 
 test("alt+o shows the original script", () => {
@@ -195,8 +200,48 @@ test("wrapped script lines keep the guide", () => {
 	}
 });
 
+test("one-line output has no hidden-line count", () => {
+	const view = createView();
+	view.result({ content: [header("completed"), { type: "text", text: "\nonly line" }], details: { calls: [] } });
+	assert.deepEqual(view.lines(), ["  ┌─ Codemode(find the renderer)", "  └─ only line · 1.4s"]);
+});
+
+test("scripts without nested calls put the count under the outcome", () => {
+	const view = createView();
+	view.result({ content: [header("completed"), { type: "text", text: "alpha\nbeta\ngamma" }], details: { calls: [] } });
+	assert.deepEqual(view.lines(), [
+		"  ┌─ Codemode(find the renderer)",
+		"  └─ alpha · 1.4s",
+		"     (+ 2 lines)",
+	]);
+});
+
+test("hidden-line count sits under the displayed line", () => {
+	const view = createView();
+	view.result({
+		content: [header("completed"), { type: "text", text: "first\nsecond\nthird" }],
+		details: { calls: [calls[0]] },
+	});
+	assert.deepEqual(view.lines(), [
+		"  ┌─ Codemode(find the renderer)",
+		"  │  └─ Bash(ls ~/workplace) ── 40ms",
+		"  └─ first · 1.4s",
+		"     (+ 2 lines)",
+	]);
+});
+
+test("expanded view drops the hidden-line count", () => {
+	const view = createView({ expanded: true });
+	view.result({ content: [header("completed"), { type: "text", text: "first\nsecond" }], details: { calls: [] } });
+	assert.deepEqual(view.lines(), [
+		"  ┌─ Codemode(find the renderer)",
+		"  │  first · 1.4s",
+		"  └─ second",
+	]);
+});
+
 test("untitled scripts show the bare label", () => {
 	const view = createView({ args: { code: "return 1;" } });
 	view.result({ content: [header("completed")], details: { calls: [] } });
-	assert.deepEqual(view.lines(), ["  ├─ Codemode ── Completed · 1.4s"]);
+	assert.deepEqual(view.lines(), ["  ┌─ Codemode", "  └─ Completed · 1.4s"]);
 });

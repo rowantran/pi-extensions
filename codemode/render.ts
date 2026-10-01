@@ -15,6 +15,7 @@ import {
 	compactRenderingState,
 	type DisplayRow,
 	firstOutputLine,
+	hiddenLinesRow,
 	renderRows,
 	toolHeading,
 } from "../compact-tools.ts";
@@ -68,6 +69,8 @@ interface CodemodeState {
 	output: string;
 	/** Whether the summary starts with the first output line, which the expanded output then skips. */
 	summaryRepeatsOutput: boolean;
+	/** Output lines the collapsed view leaves out, shown as `(+ N lines)` under the summary. */
+	hiddenLines: number;
 	failed: boolean;
 	fullOutputPath?: string;
 }
@@ -80,6 +83,7 @@ function codemodeState(context: CallRenderContext): CodemodeState {
 	state.summary ??= "";
 	state.output ??= "";
 	state.summaryRepeatsOutput ??= false;
+	state.hiddenLines ??= 0;
 	state.failed ??= false;
 	return state as CodemodeState;
 }
@@ -237,14 +241,7 @@ function renderCodemodeCall(args: { code?: unknown }, theme: Theme, context: Cal
 		const status = state.hasResult ? state.status : "running";
 		const showScript = renderingState.showFullToolCall;
 
-		if (!context.expanded && !showScript && state.calls.length === 0) {
-			return [{
-				prefix: branch(theme, "├─ ", status),
-				content: heading + theme.fg("dim", " ── ") + summary,
-				truncate: true,
-			}];
-		}
-
+		// Always a heading row and an outcome row, so the outcome sits in the same place for every script.
 		const result: DisplayRow[] = [
 			{
 				prefix: branch(theme, "┌─ ", status),
@@ -258,6 +255,7 @@ function renderCodemodeCall(args: { code?: unknown }, theme: Theme, context: Cal
 			result.push(...outputRows(theme, state));
 		} else {
 			result.push({ prefix: theme.fg("dim", "└─ "), continuation: "   ", content: summary, truncate: true });
+			if (state.hiddenLines > 0) result.push(hiddenLinesRow(theme, state.hiddenLines));
 		}
 		return result;
 	};
@@ -291,13 +289,19 @@ function summarizeResult(theme: Theme, state: CodemodeState, wallTime: string | 
 		text = theme.fg("toolOutput", firstOutputLine(state.output, "Completed"));
 	}
 	state.summaryRepeatsOutput = !state.failed && collapseWhitespace(state.output) !== "";
+	// Count the lines the expanded view adds below the summary: a success summary shows the first
+	// non-empty output line, and a failure summary shows one line of the script error.
+	const lines = collapseWhitespace(state.output) ? state.output.split("\n") : [];
+	state.hiddenLines = state.summaryRepeatsOutput
+		? lines.length - lines.findIndex((line) => collapseWhitespace(line)) - 1
+		: Math.max(0, lines.length - 1);
 
 	const failedCalls = state.calls.filter((call) => call.status === "error").length;
 	if (!state.failed && failedCalls > 0) {
 		text += theme.fg("dim", " · ") + theme.fg("error", `${failedCalls} failed`);
 	}
 	if (wallTime) text += theme.fg("dim", ` · ${wallTime}s`);
-	if (state.fullOutputPath) text += theme.fg("dim", " · truncated");
+	if (state.fullOutputPath) text += theme.fg("dim", " · output capped");
 	return text;
 }
 
@@ -318,6 +322,7 @@ function renderCodemodeResult(
 		state.failed = false;
 		state.output = "";
 		state.summaryRepeatsOutput = false;
+		state.hiddenLines = 0;
 		state.summary = theme.fg("toolOutput", "Running…");
 	} else {
 		const { wallTime, output } = splitResult(result);
