@@ -33,29 +33,38 @@ function render(name, args, text, { expanded = false, isError = false } = {}) {
 
 test("multi-line bash output shows a count under the row", () => {
 	assert.deepEqual(render("bash", { command: "ls" }, "a.txt\nb.txt\nc.txt"), [
-		"  ├─ Bash(ls) ── a.txt",
+		"  ┌─ Bash(ls)",
+		"  └─ a.txt",
 		"     (+ 2 lines)",
 	]);
 });
 
-test("one-line bash output stays on one row", () => {
-	assert.deepEqual(render("bash", { command: "echo hi" }, "\nhi\n"), ["  ├─ Bash(echo hi) ── hi"]);
+test("one-line bash output has no count", () => {
+	assert.deepEqual(render("bash", { command: "echo hi" }, "\nhi\n"), ["  ┌─ Bash(echo hi)", "  └─ hi"]);
+});
+
+test("collapsed rows stay one terminal row each", () => {
+	const lines = render("bash", { command: "x".repeat(200) }, "y".repeat(200)).map((line) => line.length);
+	assert.equal(lines.length, 2);
+	assert.ok(lines.every((width) => width <= 100));
 });
 
 test("failures count the lines after the first error line", () => {
 	assert.deepEqual(render("bash", { command: "false" }, "boom\nat x\nexit 1", { isError: true }), [
-		"  ├─ Bash(false) ── boom",
+		"  ┌─ Bash(false)",
+		"  └─ boom",
 		"     (+ 2 lines)",
 	]);
 	assert.deepEqual(render("read", { path: "/missing" }, "ENOENT\ndetails", { isError: true }), [
-		"  ├─ Read(/missing) ── ENOENT",
+		"  ┌─ Read(/missing)",
+		"  └─ ENOENT",
 		"     (+ 1 line)",
 	]);
 });
 
 test("count summaries do not repeat as a line count", () => {
-	assert.deepEqual(render("read", { path: "/a" }, "x\ny\nz"), ["  ├─ Read(/a) ── Read 3 lines"]);
-	assert.deepEqual(render("grep", { pattern: "x" }, "a:1\nb:2"), ["  ├─ Grep(x) ── Found 2 matches"]);
+	assert.deepEqual(render("read", { path: "/a" }, "x\ny\nz"), ["  ┌─ Read(/a)", "  └─ Read 3 lines"]);
+	assert.deepEqual(render("grep", { pattern: "x" }, "a:1\nb:2"), ["  ┌─ Grep(x)", "  └─ Found 2 matches"]);
 });
 
 test("expanded output skips the summary line and drops the count", () => {

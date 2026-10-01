@@ -420,23 +420,15 @@ function compactCall(
 	const hiddenRows = (): DisplayRow[] =>
 		state.hiddenLines > 0 ? [hiddenLinesRow(theme, state.hiddenLines)] : [];
 
-	// The normal view is one terminal row, plus `(+ N lines)` when the summary leaves output out.
-	if (!context.expanded && !renderingState.showFullToolCall) {
-		return lazyRows(() => [
-			{
-				prefix: branch(theme, "├─ ", state.status),
-				content: heading + (state.summary ? theme.fg("dim", " ── ") + state.summary : ""),
-				truncate: true,
-			},
-			...hiddenRows(),
-		]);
-	}
-
+	// Collapsed calls are a heading row and an outcome row, each one terminal row, plus `(+ N lines)`
+	// when the outcome leaves output out. alt+o wraps the heading and adds the arguments.
+	const collapsed = !context.expanded && !renderingState.showFullToolCall;
 	const rows: DisplayRow[] = [
 		{
 			prefix: () => branch(theme, "┌─ ", state.status),
 			continuation: theme.fg("dim", "│  "),
 			content: heading,
+			truncate: collapsed,
 		},
 	];
 
@@ -458,6 +450,7 @@ function compactCall(
 			prefix: theme.fg("dim", "└─ "),
 			continuation: "   ",
 			content: () => state.summary || theme.fg("toolOutput", "Ready"),
+			truncate: true,
 		},
 		...hiddenRows(),
 	]);

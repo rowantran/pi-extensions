@@ -247,6 +247,7 @@ function renderCodemodeCall(args: { code?: unknown }, theme: Theme, context: Cal
 				prefix: branch(theme, "┌─ ", status),
 				continuation: theme.fg("dim", "│  "),
 				content: heading,
+				truncate: !context.expanded && !showScript,
 			},
 		];
 		if (showScript) result.push(...scriptRows(theme, code));
