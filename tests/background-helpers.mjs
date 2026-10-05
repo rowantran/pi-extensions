@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import background from "../background.ts";
 
 export function fixture(t) {
-	const root = mkdtempSync(join(tmpdir(), "pi-background-test-"));
+	// Pi canonicalizes session paths; macOS exposes the temp directory through /var -> /private/var.
+	const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-background-test-")));
 	const cwd = join(root, "work");
 	const agentDir = join(root, "agent");
 	mkdirSync(cwd);

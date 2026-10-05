@@ -36,6 +36,91 @@ built-in in `~/.pi/agent/settings.json`:
 { "extensions": ["-builtin:codemode"] }
 ```
 
+## Pseudocode workflow and model routing
+
+For nontrivial work, invoke:
+
+```text
+/skill:pseudocode Describe the change you want
+```
+
+The skill keeps one conversation through planning, implementation, and review.
+It asks the agent to create a short pseudocode artifact (normally
+`plans/<task-slug>.md`), revise it with you, and wait for your approval before
+implementation. There is no separate handoff document, worker session, or context
+reset. Approval is a behavioral instruction, **not an enforced tool restriction**.
+A model-routing decision never grants permission to implement.
+
+### Configure the models once
+
+The extension requires Pi with virtual-model support (tested on 0.99.2). Use
+exact model IDs from `/model`, including their provider:
+
+```text
+/workflow models isara/claude-opus-5-5 isara/gpt-6-astra
+```
+
+The first model handles exploration, planning, and review **with you**. The
+second handles implementation, tests, self-review, and routine fixes. These are
+example IDs; select models available through your own configured providers.
+The command saves `~/.pi/agent/workflow.json` (or the directory selected by
+`PI_CODING_AGENT_DIR`). It does not change Pi's default model for other sessions.
+The file is outside this package, so normal package updates preserve it:
+
+```json
+{
+  "interactive": "isara/claude-opus-5-5",
+  "implementation": "isara/gpt-6-astra",
+  "classifier": "typesafe/jev-latest"
+}
+```
+
+The skill calls `workflow_phase` before each transition. The tool selects the
+`workflow/auto` virtual model, then routes the **next response** to the right
+physical model. In particular, the implementer signals `review` before
+presenting its result or asking you to resolve a design question. Writing a
+pseudocode file does not automatically trigger implementation. The skill also
+works with an explicitly disabled classifier (`"classifier": null`).
+
+### Optional Jev detection
+
+When a phase was not explicitly signaled, automatic routing asks the configured
+classifier which phase the next response needs. Authenticate its provider through
+Pi (`/login typesafe` for the default), or set `classifier` to an exact classifier
+ID from another supported provider. No credential is stored in `workflow.json`.
+
+Jev receives the current phase, the latest user message, and bounded text from up
+to eight recent messages. This **can include private conversation text, code, and
+tool output**; choose a classifier provider you trust. System prompts, hidden
+reasoning, images, and tool arguments are excluded. This only limits the
+classifier's input: the implementation model still gets the normal conversation.
+
+A decision must have at least 80% probability to change the phase. Classifier
+failure, missing credentials, or a five-second timeout keeps the current phase.
+Explicit phase signals still work without Jev, so missing classifier credentials
+do not block the workflow. Retries retain the original physical model; compaction
+requests do not classify or change the workflow phase. Pi's normal compaction can
+still occur, especially if the implementation model has a smaller context window.
+
+### Manual controls
+
+```text
+/workflow                 # Show selection, phase, routing mode, and configured models
+/workflow interactive     # Pin the interactive model
+/workflow implementation  # Pin the implementation model; this is not approval
+/workflow auto            # Resume phase-based routing (or select it directly)
+/workflow off             # Select the interactive physical model without routing
+```
+
+Overrides take precedence over the classifier and agent phase signals until you
+select `auto`. Phase state and overrides follow the session branch and survive
+resume and compaction. Forking from an earlier point restores that point's state.
+No operation clears or rewrites the planning history. `/workflow off` does not
+remove the skill from the conversation; tell the agent if you also want to stop
+following the pseudocode workflow.
+
+After installing or updating the package, run `/reload` or start a new Pi session.
+
 ## Background agents
 
 Background agents run Pi in RPC mode with a separate, saved conversation. New
@@ -112,4 +197,8 @@ cover assistant backgrounds across session switches, repeated lifecycle events,
 and non-TUI sessions. Background-agent tests use offline fixture providers and
 real RPC child processes to check discovery, persistence, parent restart/death,
 child crashes, torn JSONL tails, writer exclusion, idle cleanup, and recovery.
-They do not make external model requests.
+They do not make external model requests. Workflow tests cover phase routing,
+classifier failure/uncertainty, manual overrides, context preservation, and the
+real Pi runtime with offline fixture providers. The lockfile pins development
+peers to the tested Pi version; Pi supplies its own host modules when loading the
+installed extension.
