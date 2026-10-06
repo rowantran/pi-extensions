@@ -1,6 +1,5 @@
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { getAgentDir, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 export interface ModelSwitcherConfig {
@@ -45,7 +44,7 @@ function loadConfig(): ModelSwitcherConfig | undefined {
 
 export function readConfig(): ModelSwitcherConfig {
 	const config = loadConfig();
-	if (!config) throw new Error("Configure routing first: /model-switcher models <interactive-provider/model> <implementation-provider/model>");
+	if (!config) throw new Error(`Create ${configPath()} with interactive, implementation, and classifier provider/model IDs.`);
 	return config;
 }
 
@@ -54,21 +53,4 @@ export function physicalModel(ctx: ExtensionContext, ref: string) {
 	if (!model || model.api === "pi-virtual") throw new Error(`Model switcher model ${ref} must be an installed physical model.`);
 	if (!ctx.modelRegistry.hasConfiguredAuth(model)) throw new Error(`Model switcher model ${ref} has no configured credentials. Use /login for its provider.`);
 	return model;
-}
-
-export function writeModels(ctx: ExtensionContext, interactive: string, implementation: string): ModelSwitcherConfig {
-	physicalModel(ctx, interactive);
-	physicalModel(ctx, implementation);
-	const current = loadConfig();
-	const config = { interactive, implementation, classifier: current ? current.classifier : DEFAULT_CLASSIFIER };
-	const file = configPath();
-	mkdirSync(dirname(file), { recursive: true });
-	const temporary = `${file}.${randomUUID()}.tmp`;
-	try {
-		writeFileSync(temporary, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600, flag: "wx" });
-		renameSync(temporary, file);
-	} finally {
-		rmSync(temporary, { force: true });
-	}
-	return config;
 }

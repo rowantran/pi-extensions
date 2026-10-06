@@ -45,15 +45,13 @@ For nontrivial work, invoke:
 ```
 
 The skill keeps one conversation through planning, implementation, and review.
-The `model-switcher.ts` extension and its `model-switcher/` resources route each
-phase to the configured model. There is no separate handoff document, worker
-session, or context reset.
+It owns the work instructions and works with any selected model. It does not
+activate or control the model switcher.
 
-The skill owns the work instructions. The switcher only selects models: its
-phase tool returns routing status such as `{"phase":"planning","override":"auto"}`,
-not instructions to create PRs, implement, test, or review. Its classifier prompt
-is sent only to the classifier. Changing models does not reload the skill or
-append phase-specific work instructions.
+The optional `model-switcher.ts` extension uses Jev to choose a model before
+each ordinary request. It adds no agent tools, commands, work instructions, or
+handoff messages. Its classifier prompt goes only to the classifier. Pi keeps
+the conversation and routing state; there is no separate worker session.
 
 ### Agree on a committed skeleton
 
@@ -83,21 +81,11 @@ Implementation and fixes remain commits on the same draft PR, with its summary
 and verification results updated. The PR stays a draft during implementation and
 review. You own publishing and merging it.
 
-### Configure the models once
+### Configure the model switcher
 
-The extension requires Pi with virtual-model support (tested on 0.99.2). Use
-exact model IDs from `/model`, including their provider:
-
-```text
-/model-switcher models isara/claude-opus-5-5 isara/gpt-6-astra
-```
-
-The first model handles exploration, planning, and review **with you**. The
-second handles implementation, tests, self-review, and routine fixes. These are
-example IDs; select models available through your own configured providers.
-The command saves `~/.pi/agent/model-switcher.json` (or the directory selected by
-`PI_CODING_AGENT_DIR`). It does not change Pi's default model for other sessions.
-The file is outside this package, so normal package updates preserve it:
+Create `~/.pi/agent/model-switcher.json` (or use the directory selected by
+`PI_CODING_AGENT_DIR`). Use exact provider/model IDs from your installed
+providers:
 
 ```json
 {
@@ -107,89 +95,73 @@ The file is outside this package, so normal package updates preserve it:
 }
 ```
 
-The skill calls `model_switcher_phase` before each transition. The tool selects
-the `model-switcher/auto` virtual model, then routes the **next response** to the
-right physical model. Skeleton discussion stays in planning. The agent signals
-`review` before presenting completed work or asking you to resolve a design
-question during implementation. Writing or publishing a skeleton does not
-automatically trigger implementation. The skill also works with an explicitly
-disabled classifier (`"classifier": null`).
+The interactive model handles planning and discussion with you. The
+implementation model handles coding, tests, and routine fixes. The IDs above
+are examples; each selected provider must have usable credentials. Choose a
+registered classifier through a provider you trust. This package does not add
+classifier support to the Isara provider or local proxy.
 
-### Optional Jev detection
+The configuration stays outside the package and is read-only to the extension.
+There is no configuration command and no credential belongs in this file.
 
-When a phase was not explicitly signaled, automatic routing asks the configured
-classifier which phase the next response needs. Authenticate its provider through
-Pi (`/login typesafe` for the default), or set `classifier` to an exact classifier
-ID from another supported provider. No credential is stored in
-`model-switcher.json`.
+### Select automatic or manual routing
 
-Jev receives the current phase, the latest user message, and bounded text from up
-to eight recent messages. This **can include private conversation text, code, and
-tool output**; choose a classifier provider you trust. System prompts, hidden
-reasoning, images, and tool arguments are excluded. This only limits the
-classifier's input: the implementation model still gets the normal conversation.
+Use Pi's normal `/model` picker:
 
-A decision must have at least 80% probability to change the phase. Classifier
-failure, missing credentials, or a five-second timeout keeps the current phase.
-Explicit phase signals still work without Jev, so missing classifier credentials
-do not block the workflow. Retries retain the original physical model; compaction
-requests do not classify or change the workflow phase. Pi's normal compaction can
-still occur, especially if the implementation model has a smaller context window.
+- Select `model-switcher/auto` for classifier-based routing.
+- Select any physical model for manual control; this bypasses the classifier.
+- Select `model-switcher/auto` again to resume automatic routing.
 
-### Compared with Pi's example
+Invoking `/skill:pseudocode` does not change that selection. You can use the
+skill without the switcher, and the switcher without the skill.
 
-[Pi's basic virtual-model example](https://pi.dev/docs/latest/virtual-models)
-chooses a model from the thinking level and keeps follow-up requests on that
-model. The linked Jev example classifies the initial task, then switches once
-on the first successful file edit. Neither policy detects a return to interactive
-review, and switching on the first edit would treat a pseudocode edit as
-implementation.
+### How routing works
 
-This extension adds ongoing phase classification, bounded classifier input and
-failure handling, plus a separate explicit phase tool. The tool, manual pins,
-configuration commands, status UI, and old-name compatibility account for much
-of the extra code; they are not requirements of Pi's virtual-model API. Pi itself
-preserves the conversation and returned router state. The explicit phase tool
-also allows switching when the classifier is unavailable. Replacing both routing
-controls with classifier-only routing would simplify the extension, but would
-remove that fallback and needs a working classifier.
+Jev classifies the next response as planning, implementation, or review.
+Planning and review use the interactive model; implementation uses the other
+model. A valid decision needs at least 80% probability to change the phase.
+File writes do not independently switch models: they can be planning edits.
 
-### Manual controls
+Jev receives the current phase, the latest user message, and bounded text from
+up to eight recent messages. This **can include private conversation text, code,
+and tool output**. System prompts, hidden reasoning, images, and tool arguments
+are excluded. Only the classifier input is reduced; the coding model receives
+the normal conversation.
 
-```text
-/model-switcher                 # Show selection, phase, routing mode, and configured models
-/model-switcher interactive     # Pin the interactive model
-/model-switcher implementation  # Pin the implementation model; this is not approval
-/model-switcher auto            # Resume phase-based routing (or select it directly)
-/model-switcher off             # Select the interactive physical model without routing
-```
+An uncertain decision keeps the current phase. An unavailable, disabled
+(`"classifier": null`), or failed classifier also keeps the current phase and
+warns once per session when a UI is available. Classification has a five-second
+timeout. Without a saved phase, routing starts on the interactive model.
+**There is no explicit phase-tool fallback anymore.** If classification cannot
+run, choose a model manually through `/model`.
 
-Overrides take precedence over the classifier and agent phase signals until you
-select `auto`. Phase state and overrides follow the session branch and survive
-resume and compaction. Forking from an earlier point restores that point's state.
-No operation clears or rewrites the planning history. `/model-switcher off` does
-not remove the skill from the conversation; tell the agent if you also want to
-stop following the pseudocode workflow.
+Switching is inferred, not guaranteed at an exact work boundary. Model choice
+never approves work or certifies completion. The skill's agreement with the
+user still applies regardless of the selected model.
 
-After installing or updating the package, run `/reload` or start a new Pi session.
+The router returns its phase as Pi's native virtual-model state. Pi preserves
+it across resume, branches, and compaction. No extension-specific signal or pin
+journal is read or written. Retries reuse the failed model; direct requests,
+including compaction, keep the previous physical model and do not classify.
+Normal Pi compaction can still occur if a selected model has a smaller context
+window.
 
-### Upgrade from the old names
+This uses the same `registerVirtualModel` and `request.state` mechanism as
+[Pi's virtual-model example](https://pi.dev/docs/latest/virtual-models), with
+ongoing classification rather than a one-time switch after the first edit.
 
-If you configured explicit extension or resource paths, update them to
-`model-switcher.ts` and `model-switcher/`. Use `/model-switcher` and
-`model_switcher_phase` in place of the old command and tool names.
+### Upgrade from explicit routing controls
 
-The extension reads `~/.pi/agent/workflow.json` only when
-`~/.pi/agent/model-switcher.json` is absent. Saving the model pair with
-`/model-switcher models <interactive-provider/model> <implementation-provider/model>`
-writes the new file and preserves the existing classifier choice, including
-`null`. If both files exist, the new file takes precedence. These paths use
-`PI_CODING_AGENT_DIR` when set.
+Run `/reload` or start a new Pi session. The `/model-switcher` commands and
+`model_switcher_phase` tool have been removed. Old phase signals and manual pins
+are ignored; use the native `/model` picker instead. Existing
+`model-switcher/auto` sessions retain the phase Pi already saved, then follow
+classifier decisions. Very old `workflow/auto` sessions need the new virtual
+model selected; their separate legacy phase records are no longer imported.
 
-The old `workflow/auto` virtual model is no longer registered. After updating and
-reloading, select `/model-switcher auto` in an old session to restore its saved
-phase state under `model-switcher/auto`. This resumes automatic routing; reapply
-an interactive or implementation pin if needed. The conversation is preserved.
+Existing `workflow.json` settings remain readable when `model-switcher.json`
+is absent. If both exist, the new file wins. The extension does not rewrite
+either file or change your default model.
 
 ## Background agents
 
@@ -268,7 +240,7 @@ and non-TUI sessions. Background-agent tests use offline fixture providers and
 real RPC child processes to check discovery, persistence, parent restart/death,
 child crashes, torn JSONL tails, writer exclusion, idle cleanup, and recovery.
 They do not make external model requests. Model-switcher tests cover phase
-routing, classifier failure/uncertainty, manual overrides, context preservation,
-and the real Pi runtime with offline fixture providers. The lockfile pins development
+routing, classifier failure/uncertainty, native model selection, context
+preservation, and the real Pi runtime with offline fixture providers. The lockfile pins development
 peers to the tested Pi version; Pi supplies its own host modules when loading the
 installed extension.
