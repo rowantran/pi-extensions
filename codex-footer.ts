@@ -11,7 +11,7 @@ const SEPARATOR = " · ";
 const MODEL_STATUS_KEYS = ["isara-fast"];
 // Shown before the model when a virtual model (such as model-switcher/auto)
 // picks the physical model for each request.
-const VIRTUAL_MODEL_BADGE = "[A]";
+const VIRTUAL_MODEL_BADGE = "\uF074"; // Nerd Fonts nf-fa-shuffle
 
 type FooterModel = { model: ExtensionContext["model"]; thinkingLevel: string | undefined; virtual: boolean };
 

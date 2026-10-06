@@ -42,11 +42,11 @@ function modelSegment(selected, branch) {
 
 test("a virtual model shows the badge and the physical model of the latest successful response", () => {
 	const branch = [selectAuto, response(opus), response(astra), response(opus, "error")];
-	assert.equal(modelSegment(auto, branch), "[A] (isara) gpt-6-astra high (400k ctx)");
+	assert.equal(modelSegment(auto, branch), "\uF074 (isara) gpt-6-astra high (400k ctx)");
 });
 
 test("a virtual model shows itself until it has routed a response", () => {
-	assert.equal(modelSegment(auto, [response(opus), selectAuto]), "[A] (model-switcher) auto high");
+	assert.equal(modelSegment(auto, [response(opus), selectAuto]), "\uF074 (model-switcher) auto high");
 });
 
 test("a physical model shows no badge", () => {
