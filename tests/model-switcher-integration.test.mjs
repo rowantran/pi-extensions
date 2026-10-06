@@ -16,8 +16,8 @@ import {
 const packageRoot = fileURLToPath(new URL("../", import.meta.url));
 const skillPath = join(packageRoot, "skills", "pseudocode", "SKILL.md");
 const models = {
-	primary: { provider: "workflow-test-primary", id: "planner" },
-	secondary: { provider: "workflow-test-secondary", id: "builder" },
+	primary: { provider: "model-switcher-test-primary", id: "planner" },
+	secondary: { provider: "model-switcher-test-secondary", id: "builder" },
 };
 const goal = "Plan a cache with a strict capacity of 17. Do not implement before I approve.";
 const correction = "Correction: evict the oldest insertion, not the least recently read item. Keep capacity 17.";
@@ -39,11 +39,11 @@ function customEntries(session, type) {
 
 function routerStates(session) {
 	return customEntries(session, "pi.virtual-model-state")
-		.filter((entry) => entry.data.provider === "workflow" && entry.data.modelId === "auto");
+		.filter((entry) => entry.data.provider === "model-switcher" && entry.data.modelId === "auto");
 }
 
 function assertVirtualSelection(session) {
-	assert.equal(session.model.provider, "workflow");
+	assert.equal(session.model.provider, "model-switcher");
 	assert.equal(session.model.id, "auto");
 	assert.equal(session.model.api, "pi-virtual");
 }
@@ -68,8 +68,8 @@ function fakeStream(f, model, context, options) {
 			assert.deepEqual(call.model, models[step.model], "Pi must dispatch to the expected physical provider");
 			stream.push({ type: "start", partial: output });
 			if (step.phase) {
-				const id = `workflow-call-${f.calls.length}`;
-				output.content.push({ type: "toolCall", id, name: "workflow_phase", arguments: {} });
+				const id = `model-switcher-call-${f.calls.length}`;
+				output.content.push({ type: "toolCall", id, name: "model_switcher_phase", arguments: {} });
 				stream.push({ type: "toolcall_start", contentIndex: 0, partial: output });
 				output.content[0].arguments = { phase: step.phase };
 				stream.push({ type: "toolcall_delta", contentIndex: 0, delta: JSON.stringify({ phase: step.phase }), partial: output });
@@ -96,8 +96,8 @@ function fakeStream(f, model, context, options) {
 	return stream;
 }
 
-function fixture(t) {
-	const root = mkdtempSync(join(tmpdir(), "pi-workflow-integration-"));
+function fixture(t, { legacyConfig = false } = {}) {
+	const root = mkdtempSync(join(tmpdir(), "pi-model-switcher-integration-"));
 	const cwd = join(root, "work");
 	const agentDir = join(root, "agent");
 	const home = join(root, "home");
@@ -106,13 +106,13 @@ function fixture(t) {
 	const previous = Object.fromEntries(Object.keys(environment).map((key) => [key, process.env[key]]));
 	Object.assign(process.env, environment);
 	const authPath = join(agentDir, "auth.json");
-	const configPath = join(agentDir, "workflow.json");
-	const config = JSON.stringify({ interactive: "workflow-test-primary/planner", implementation: "workflow-test-secondary/builder", classifier: null });
+	const configPath = join(agentDir, legacyConfig ? "workflow.json" : "model-switcher.json");
+	const config = JSON.stringify({ interactive: "model-switcher-test-primary/planner", implementation: "model-switcher-test-secondary/builder", classifier: null });
 	writeFileSync(authPath, "{}\n", { mode: 0o600 });
 	writeFileSync(configPath, config, { mode: 0o600 });
 	// Catalog refresh is disabled, both providers have local implementations, and
 	// this guard makes accidental fetch-based network requests fail immediately.
-	const fetch = t.mock.method(globalThis, "fetch", () => { throw new Error("Network access is forbidden in workflow integration tests"); });
+	const fetch = t.mock.method(globalThis, "fetch", () => { throw new Error("Network access is forbidden in model-switcher integration tests"); });
 	const f = { root, cwd, agentDir, steps: [], calls: [], providerErrors: [], extensionErrors: [], sessions: [], compacting: false };
 	t.after(async () => {
 		try {
@@ -122,7 +122,7 @@ function fixture(t) {
 			}
 			assert.equal(fetch.mock.callCount(), 0, "No network fetches");
 			assert.equal(readFileSync(authPath, "utf8"), "{}\n", "No credential mutations");
-			assert.equal(readFileSync(configPath, "utf8"), config, "Phase tools do not change workflow configuration");
+			assert.equal(readFileSync(configPath, "utf8"), config, "Phase tools do not change model-switcher configuration");
 			assert.equal(existsSync(join(agentDir, "settings.json")), false, "Settings stay in memory");
 		} finally {
 			for (const [key, value] of Object.entries(previous)) {
@@ -136,7 +136,7 @@ function fixture(t) {
 		const settingsManager = SettingsManager.inMemory({
 			defaultProvider: models.primary.provider, defaultModel: models.primary.id, defaultThinkingLevel: "high",
 			// Do not supply a skill path: discovery must use the real package's pi.skills manifest.
-			packages: [{ source: packageRoot, extensions: ["workflow.ts"], prompts: [], themes: [] }],
+			packages: [{ source: packageRoot, extensions: ["model-switcher.ts"], prompts: [], themes: [] }],
 			compaction: { enabled: false, reserveTokens: 1024, keepRecentTokens: 80 },
 			retry: { enabled: false }, cacheWarming: "off", enableSkillCommands: true,
 		});
@@ -160,7 +160,7 @@ function fixture(t) {
 		});
 		assert.deepEqual(services.diagnostics, []);
 		assert.deepEqual(services.resourceLoader.getExtensions().errors, []);
-		const result = await createAgentSessionFromServices({ services, sessionManager: manager, tools: ["workflow_phase"] });
+		const result = await createAgentSessionFromServices({ services, sessionManager: manager, tools: ["model_switcher_phase"] });
 		const { session } = result;
 		f.sessions.push(session);
 		assert.equal(result.modelFallbackMessage, undefined);
@@ -209,7 +209,7 @@ function assertPlanningPreserved(calls, planning) {
 	}
 }
 
-test("workflow package skill is discoverable but requires explicit opt-in", { timeout: 30000 }, async (t) => {
+test("model-switcher package skill is discoverable but requires explicit opt-in", { timeout: 30000 }, async (t) => {
 	const f = fixture(t);
 	const { session, services } = await f.open();
 	const { skills, diagnostics } = services.resourceLoader.getSkills();
@@ -219,10 +219,10 @@ test("workflow package skill is discoverable but requires explicit opt-in", { ti
 	assert.equal(skills[0].disableModelInvocation, true);
 	assert.equal(session.model.provider, models.primary.provider);
 	assert.doesNotMatch(session.systemPrompt, /<name>pseudocode<\/name>|Agree on pseudocode, then implement/);
-	await f.prompt(session, "An ordinary question; do not enter the workflow.",
-		{ model: "primary", text: "Ordinary response without workflow activation." });
+	await f.prompt(session, "An ordinary question; do not enter the model-switcher.",
+		{ model: "primary", text: "Ordinary response without model-switcher activation." });
 	assert.equal(session.model.provider, models.primary.provider);
-	assert.deepEqual(customEntries(session, "workflow.phase"), []);
+	assert.deepEqual(customEntries(session, "model-switcher.phase"), []);
 	assert.deepEqual(routerStates(session), []);
 	assert.doesNotMatch(JSON.stringify(f.calls[0].messages), /Agree on pseudocode, then implement/);
 });
@@ -254,14 +254,14 @@ test("real phase tool routes planning → implementation → review without losi
 	assert.deepEqual(results.map((message) => message.details), [
 		{ phase: "planning", override: "auto" }, { phase: "implementation", override: "auto" }, { phase: "review", override: "auto" },
 	]);
-	assert.deepEqual(customEntries(session, "workflow.phase").map((entry) => entry.data.phase), ["planning", "implementation", "review"]);
+	assert.deepEqual(customEntries(session, "model-switcher.phase").map((entry) => entry.data.phase), ["planning", "implementation", "review"]);
 	assert.deepEqual(routerStates(session).map((entry) => entry.data.state.phase), ["planning", "implementation", "review"]);
 	assert.equal(session.sessionManager.getBranch().some((entry) => entry.type === "compaction"), false);
 	assert.equal(services.settingsManager.getDefaultProvider(), models.primary.provider, "pi.setModel must not rewrite default provider");
 	assert.equal(services.settingsManager.getDefaultModel(), models.primary.id);
 });
 
-test("workflow router state survives fresh SDK resume, tree branches, and real compaction", { timeout: 30000 }, async (t) => {
+test("model-switcher router state survives fresh SDK resume, tree branches, and real compaction", { timeout: 30000 }, async (t) => {
 	const f = fixture(t);
 	const first = await f.open();
 	const planning = await plan(f, first.session);
@@ -294,7 +294,7 @@ test("workflow router state survives fresh SDK resume, tree branches, and real c
 	await f.prompt(session, "Continue implementation on this alternative branch.",
 		{ model: "secondary", text: "Alternative implementation branch, still using the approved design." });
 	assertPlanningPreserved([f.calls.at(-1)], planning);
-	assert.equal(customEntries(session, "workflow.phase").some((entry) => entry.data.phase === "review"), false);
+	assert.equal(customEntries(session, "model-switcher.phase").some((entry) => entry.data.phase === "review"), false);
 	assert.equal(f.calls.at(-1).messages.some((message) => textOf(message) === "Review on the original branch."), false);
 	assert.ok(session.sessionManager.getEntry(reviewLeaf), "Abandoned review history remains in the session tree");
 
@@ -316,7 +316,7 @@ test("workflow router state survives fresh SDK resume, tree branches, and real c
 	assert.ok(session.sessionManager.getBranch().some((entry) => entry.type === "compaction"));
 	assert.ok(session.messages.some((message) => message.role === "compactionSummary"));
 	await f.prompt(session, "Continue after normal context compaction.",
-		{ model: "secondary", text: "Implementation continues with preserved workflow state." });
+		{ model: "secondary", text: "Implementation continues with preserved model-switcher state." });
 	assert.deepEqual(routerStates(session), statesBeforeCompaction);
 	assertVirtualSelection(session);
 
@@ -326,4 +326,40 @@ test("workflow router state survives fresh SDK resume, tree branches, and real c
 	const savedUsers = entries.filter((entry) => entry.type === "message" && entry.message.role === "user").map((entry) => entry.message);
 	assert.deepEqual(savedUsers.slice(0, planning.length), planning);
 	assert.equal(session.sessionFile, savedFile);
+});
+
+test("legacy config and saved workflow session resume through the renamed command without losing the phase", { timeout: 30000 }, async (t) => {
+	const f = fixture(t, { legacyConfig: true });
+	const first = await f.open();
+	const planning = await plan(f, first.session);
+	await implement(f, first.session);
+	const savedFile = first.session.sessionFile;
+	const sessionId = first.session.sessionId;
+	first.session.dispose();
+
+	// Reproduce the old public session format in this temporary fixture only.
+	// Resume must load it without registering an obsolete virtual-model alias.
+	const entries = readFileSync(savedFile, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+	for (const entry of entries) {
+		if (entry.type === "model_change" && entry.provider === "model-switcher") entry.provider = "workflow";
+		if (entry.type !== "custom") continue;
+		if (entry.customType === "pi.virtual-model-state" && entry.data.provider === "model-switcher") entry.data.provider = "workflow";
+		if (entry.customType === "model-switcher.phase") entry.customType = "workflow.phase";
+		if (entry.customType === "model-switcher.override") entry.customType = "workflow.override";
+	}
+	writeFileSync(savedFile, entries.map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+	const oldState = entries.findLast((entry) => entry.type === "custom" && entry.customType === "pi.virtual-model-state").data.state;
+	const { session } = await f.open(SessionManager.open(savedFile, join(f.root, "sessions")));
+	assert.equal(session.sessionId, sessionId);
+	assert.equal(session.model.provider, models.secondary.provider, "Pi falls back to the last physical model until the new router is selected");
+	assert.deepEqual(routerStates(session), []);
+	const start = f.calls.length;
+	await f.prompt(session, "/model-switcher auto");
+	assert.equal(f.calls.length, start, "the renamed command activates routing without a model request");
+	assertVirtualSelection(session);
+	await f.prompt(session, "Continue the already approved implementation.",
+		{ model: "secondary", text: "Continued implementation using the existing phase, not a repeated phase signal." });
+	assert.deepEqual(routerStates(session).at(-1).data.state, oldState);
+	assertPlanningPreserved(f.calls.slice(start), planning);
+	assert.equal(existsSync(join(f.agentDir, "model-switcher.json")), false, "reading legacy settings does not rewrite them");
 });

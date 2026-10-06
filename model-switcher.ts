@@ -2,17 +2,18 @@ import { readFileSync } from "node:fs";
 import { Type } from "typebox";
 import type { Message } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext, ModelRouteRequest, SessionEntry } from "@earendil-works/pi-coding-agent";
-import { configPath, modelRef, physicalModel, readConfig, writeModels } from "./workflow/config.ts";
+import { configPath, modelRef, physicalModel, readConfig, writeModels } from "./model-switcher/config.ts";
 
-export const PROVIDER = "workflow";
+export const PROVIDER = "model-switcher";
 export const MODEL = "auto";
-const SIGNAL = "workflow.phase";
-const OVERRIDE = "workflow.override";
+const LEGACY_PROVIDER = "workflow";
+const SIGNAL = "model-switcher.phase";
+const OVERRIDE = "model-switcher.override";
 const PHASES = ["planning", "implementation", "review"] as const;
 type Phase = typeof PHASES[number];
 type Override = "auto" | "interactive" | "implementation";
-export interface WorkflowState { phase: Phase; signalId?: string }
-const prompts = JSON.parse(readFileSync(new URL("./workflow/prompts.json", import.meta.url), "utf8"));
+export interface ModelSwitcherState { phase: Phase; signalId?: string }
+const prompts = JSON.parse(readFileSync(new URL("./model-switcher/prompts.json", import.meta.url), "utf8"));
 
 function phase(value: unknown): value is Phase {
 	return PHASES.includes(value as Phase);
@@ -28,20 +29,24 @@ function controls(branch: readonly SessionEntry[]) {
 	for (const entry of branch) {
 		if (entry.type !== "custom") continue;
 		const data = entry.data as Record<string, unknown> | undefined;
-		if (entry.customType === SIGNAL && phase(data?.phase)) signal = { id: entry.id, phase: data.phase, userId: data.userId };
-		if (entry.customType === OVERRIDE && ["auto", "interactive", "implementation"].includes(data?.mode as string)) {
+		if ((entry.customType === SIGNAL || entry.customType === `${LEGACY_PROVIDER}.phase`) && phase(data?.phase)) {
+			signal = { id: entry.id, phase: data.phase, userId: data.userId };
+		}
+		if ((entry.customType === OVERRIDE || entry.customType === `${LEGACY_PROVIDER}.override`)
+			&& ["auto", "interactive", "implementation"].includes(data?.mode as string)) {
 			override = data!.mode as Override;
 		}
 	}
 	return { signal, override };
 }
 
-function savedState(branch: readonly SessionEntry[]): WorkflowState | undefined {
+function savedState(branch: readonly SessionEntry[]): ModelSwitcherState | undefined {
 	for (let i = branch.length - 1; i >= 0; i--) {
 		const entry = branch[i];
 		if (entry.type !== "custom" || entry.customType !== "pi.virtual-model-state") continue;
-		const data = entry.data as { provider?: string; modelId?: string; state?: WorkflowState };
-		if (data?.provider === PROVIDER && data.modelId === MODEL && phase(data.state?.phase)) return data.state;
+		const data = entry.data as { provider?: string; modelId?: string; state?: ModelSwitcherState };
+		if ((data?.provider === PROVIDER || data?.provider === LEGACY_PROVIDER)
+			&& data.modelId === MODEL && phase(data.state?.phase)) return data.state;
 	}
 }
 
@@ -55,7 +60,7 @@ function textOf(message: Message, limit: number): string {
 }
 
 /** A bounded classifier input only; the implementation conversation is never transformed. */
-export function classifierContext(request: ModelRouteRequest<WorkflowState>, currentPhase: Phase) {
+export function classifierContext(request: ModelRouteRequest<ModelSwitcherState>, currentPhase: Phase) {
 	const messages = request.messages.filter((message) => message.role !== "system");
 	const user = messages.findLast((message) => message.role === "user");
 	return {
@@ -75,7 +80,7 @@ export function classifierContext(request: ModelRouteRequest<WorkflowState>, cur
 	};
 }
 
-export default function workflow(pi: ExtensionAPI) {
+export default function modelSwitcher(pi: ExtensionAPI) {
 	const warnings = new WeakMap<object, Set<string>>();
 	function warn(ctx: ExtensionContext, message: string) {
 		let shown = warnings.get(ctx.sessionManager);
@@ -85,7 +90,7 @@ export default function workflow(pi: ExtensionAPI) {
 		if (ctx.hasUI) ctx.ui.notify(message, "warning");
 	}
 	function status(ctx: ExtensionContext, currentPhase: Phase, override: Override) {
-		if (ctx.hasUI) ctx.ui.setStatus("workflow", `workflow: ${currentPhase}${override === "auto" ? "" : ` (${override} override)`}`);
+		if (ctx.hasUI) ctx.ui.setStatus("model-switcher", `model switcher: ${currentPhase}${override === "auto" ? "" : ` (${override} override)`}`);
 	}
 	async function activate(ctx: ExtensionContext) {
 		const config = readConfig();
@@ -94,17 +99,17 @@ export default function workflow(pi: ExtensionAPI) {
 		if (ctx.model?.provider === PROVIDER && ctx.model.id === MODEL) return;
 		const model = ctx.modelRegistry.find(PROVIDER, MODEL);
 		const thinkingLevel = pi.getThinkingLevel();
-		if (!model || !await pi.setModel(model)) throw new Error("Could not select workflow/auto. Reload the extension and try again.");
+		if (!model || !await pi.setModel(model)) throw new Error("Could not select model-switcher/auto. Reload the extension and try again.");
 		pi.setThinkingLevel(thinkingLevel);
 	}
 
-	pi.registerVirtualModel<WorkflowState>({
-		provider: PROVIDER, id: MODEL, name: "Pseudocode workflow",
+	pi.registerVirtualModel<ModelSwitcherState>({
+		provider: PROVIDER, id: MODEL, name: "Model switcher",
 		thinkingLevels: ["off", "minimal", "low", "medium", "high", "xhigh", "max"],
 		async route(request, ctx) {
 			request.signal?.throwIfAborted();
 			const config = readConfig();
-			// Compaction/other nested calls must not classify or change the workflow phase.
+			// Compaction/other nested calls must not classify or change the routing phase.
 			if (request.reason === "direct") {
 				return { model: request.previous?.model ?? physicalModel(ctx, config.interactive), thinkingLevel: request.thinkingLevel };
 			}
@@ -114,7 +119,9 @@ export default function workflow(pi: ExtensionAPI) {
 			}
 			const branch = ctx.sessionManager.getBranch();
 			const { signal, override } = controls(branch);
-			let state = request.state && phase(request.state.phase) ? request.state : { phase: "planning" as Phase };
+			// The renamed virtual model has no Pi-owned state on its first request.
+			// Recover the old phase from this branch without rewriting session history.
+			let state = request.state && phase(request.state.phase) ? request.state : savedState(branch) ?? { phase: "planning" as Phase };
 			const pendingSignal = signal && signal.id !== state.signalId;
 			const hasSignal = pendingSignal && signal.userId === latestUserId(branch);
 			// An interrupted phase call must not override a newer user turn. Consume
@@ -124,7 +131,7 @@ export default function workflow(pi: ExtensionAPI) {
 			if (!hasSignal && override === "auto" && config.classifier && request.reason !== "retry") {
 				const classifier = ctx.modelRegistry.findOfType("classifier", ...modelRef(config.classifier));
 				if (!classifier) {
-					warn(ctx, `Workflow classifier ${config.classifier} is unavailable. Phase signals and /workflow overrides still work.`);
+					warn(ctx, `Model switcher classifier ${config.classifier} is unavailable. Phase signals and /model-switcher overrides still work.`);
 				} else {
 					try {
 						const signal = AbortSignal.any([...(request.signal ? [request.signal] : []), AbortSignal.timeout(5000)]);
@@ -136,11 +143,11 @@ export default function workflow(pi: ExtensionAPI) {
 							&& answer.choice !== state.phase) {
 							state = { ...state, phase: answer.choice };
 						} else if (result.stopReason !== "stop") {
-							warn(ctx, "Workflow classifier could not decide (credentials, timeout, or provider failure). Keeping the current phase; phase signals and /workflow overrides still work.");
+							warn(ctx, "Model switcher classifier could not decide (credentials, timeout, or provider failure). Keeping the current phase; phase signals and /model-switcher overrides still work.");
 						}
 					} catch {
 						request.signal?.throwIfAborted();
-						warn(ctx, "Workflow classifier failed. Keeping the current phase; phase signals and /workflow overrides still work.");
+						warn(ctx, "Model switcher classifier failed. Keeping the current phase; phase signals and /model-switcher overrides still work.");
 					}
 				}
 			}
@@ -152,7 +159,7 @@ export default function workflow(pi: ExtensionAPI) {
 	});
 
 	pi.registerTool({
-		name: "workflow_phase", label: "Workflow phase", description: prompts.toolDescription,
+		name: "model_switcher_phase", label: "Model switcher phase", description: prompts.toolDescription,
 		parameters: Type.Object({ phase: Type.Union(PHASES.map((value) => Type.Literal(value))) }),
 		async execute(_id, params, signal, _onUpdate, ctx) {
 			signal?.throwIfAborted();
@@ -166,10 +173,10 @@ export default function workflow(pi: ExtensionAPI) {
 		},
 	});
 
-	pi.registerCommand("workflow", {
+	pi.registerCommand("model-switcher", {
 		description: "Model routing: status | models <interactive> <implementation> | auto | interactive | implementation | off",
 		async handler(args, ctx) {
-			if (!ctx.isIdle()) { ctx.ui.notify("Wait for the current run to finish before changing workflow routing.", "warning"); return; }
+			if (!ctx.isIdle()) { ctx.ui.notify("Wait for the current run to finish before changing model routing.", "warning"); return; }
 			try {
 				const [command = "status", ...rest] = args.trim().split(/\s+/).filter(Boolean);
 				if (command === "models" && rest.length === 2) {
@@ -177,12 +184,12 @@ export default function workflow(pi: ExtensionAPI) {
 					ctx.ui.notify(`Saved ${configPath()}\nInteractive: ${config.interactive}\nImplementation: ${config.implementation}`, "info");
 				} else if (command === "off" && rest.length === 0) {
 					if (!await pi.setModel(physicalModel(ctx, readConfig().interactive))) throw new Error("Could not select the interactive model.");
-					ctx.ui.setStatus("workflow", undefined);
-					ctx.ui.notify("Workflow routing off. Continuing with the interactive model in the same conversation.", "info");
+					ctx.ui.setStatus("model-switcher", undefined);
+					ctx.ui.notify("Model switcher routing off. Continuing with the interactive model in the same conversation.", "info");
 				} else if (["auto", "interactive", "implementation"].includes(command) && rest.length === 0) {
 					await activate(ctx);
 					pi.appendEntry(OVERRIDE, { mode: command });
-					ctx.ui.notify(`Workflow routing: ${command}. This changes model routing, not implementation approval.`, "info");
+					ctx.ui.notify(`Model switcher routing: ${command}. This changes model routing, not implementation approval.`, "info");
 				} else if (command === "status" && rest.length === 0) {
 					const branch = ctx.sessionManager.getBranch();
 					const { signal, override } = controls(branch);
@@ -190,13 +197,13 @@ export default function workflow(pi: ExtensionAPI) {
 					const currentPhase = signal && signal.id !== saved?.signalId && signal.userId === latestUserId(branch) ? signal.phase : saved?.phase ?? "planning";
 					const config = readConfig();
 					const active = ctx.model?.provider === PROVIDER && ctx.model.id === MODEL;
-					ctx.ui.notify(`Workflow ${active ? "selected" : "not selected"}; phase: ${currentPhase}; routing: ${override}\nInteractive: ${config.interactive}\nImplementation: ${config.implementation}\nClassifier: ${config.classifier ?? "disabled"}`, "info");
-				} else throw new Error("Usage: /workflow [status | models <interactive-provider/model> <implementation-provider/model> | auto | interactive | implementation | off]");
+					ctx.ui.notify(`Model switcher ${active ? "selected" : "not selected"}; phase: ${currentPhase}; routing: ${override}\nInteractive: ${config.interactive}\nImplementation: ${config.implementation}\nClassifier: ${config.classifier ?? "disabled"}`, "info");
+				} else throw new Error("Usage: /model-switcher [status | models <interactive-provider/model> <implementation-provider/model> | auto | interactive | implementation | off]");
 			} catch (error) { ctx.ui.notify(error instanceof Error ? error.message : String(error), "error"); }
 		},
 	});
 
 	pi.on("model_select", (_event, ctx) => {
-		if (ctx.hasUI && (ctx.model?.provider !== PROVIDER || ctx.model.id !== MODEL)) ctx.ui.setStatus("workflow", undefined);
+		if (ctx.hasUI && (ctx.model?.provider !== PROVIDER || ctx.model.id !== MODEL)) ctx.ui.setStatus("model-switcher", undefined);
 	});
 }

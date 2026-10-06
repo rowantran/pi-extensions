@@ -36,7 +36,7 @@ built-in in `~/.pi/agent/settings.json`:
 { "extensions": ["-builtin:codemode"] }
 ```
 
-## Pseudocode workflow and model routing
+## Pseudocode skill and model switcher
 
 For nontrivial work, invoke:
 
@@ -45,11 +45,37 @@ For nontrivial work, invoke:
 ```
 
 The skill keeps one conversation through planning, implementation, and review.
-It asks the agent to create a short pseudocode artifact (normally
-`plans/<task-slug>.md`), revise it with you, and wait for your approval before
-implementation. There is no separate handoff document, worker session, or context
-reset. Approval is a behavioral instruction, **not an enforced tool restriction**.
-A model-routing decision never grants permission to implement.
+The `model-switcher.ts` extension and its `model-switcher/` resources route each
+phase to the configured model. There is no separate handoff document, worker
+session, or context reset.
+
+### Agree on a committed skeleton
+
+The agent writes pseudocode and stubs at the real implementation paths. The
+skeleton focuses on important contracts, control flow, and assumptions; it need
+not compile. The first task commit contains this skeleton, not implementation.
+The agent pushes it and opens a draft PR against the appropriate confirmed base
+branch. The PR body identifies the skeleton and important decisions and
+assumptions, with `Closes #N` only when an issue is assigned.
+
+The agent reports the PR URL and exact skeleton commit SHA, then waits for your
+approval of that version before expanding the same files into code. Requested
+skeleton revisions become new commits on the same draft PR and need approval of
+the revised version. The first skeleton commit stays in history; it is not
+amended away. Approval is a behavioral instruction, **not an enforced tool
+restriction**. Model selection, classifier output, and successful tool calls
+never grant permission to implement.
+
+On an existing branch or resumed task, the agent checks files, history, pushes,
+and PRs before repeating actions. It avoids unrelated changes and duplicate PRs.
+If existing implementation commits prevent a first skeleton commit, it pauses
+to agree a branch approach rather than rewriting history to fabricate one.
+Missing GitHub authentication or a usable remote blocks publication; the agent
+reports the blocker instead of silently proceeding to implementation.
+
+Implementation and fixes remain commits on the same draft PR, with its summary
+and verification results updated. The PR stays a draft during implementation and
+review. You own publishing and merging it.
 
 ### Configure the models once
 
@@ -57,13 +83,13 @@ The extension requires Pi with virtual-model support (tested on 0.99.2). Use
 exact model IDs from `/model`, including their provider:
 
 ```text
-/workflow models isara/claude-opus-5-5 isara/gpt-6-astra
+/model-switcher models isara/claude-opus-5-5 isara/gpt-6-astra
 ```
 
 The first model handles exploration, planning, and review **with you**. The
 second handles implementation, tests, self-review, and routine fixes. These are
 example IDs; select models available through your own configured providers.
-The command saves `~/.pi/agent/workflow.json` (or the directory selected by
+The command saves `~/.pi/agent/model-switcher.json` (or the directory selected by
 `PI_CODING_AGENT_DIR`). It does not change Pi's default model for other sessions.
 The file is outside this package, so normal package updates preserve it:
 
@@ -75,19 +101,21 @@ The file is outside this package, so normal package updates preserve it:
 }
 ```
 
-The skill calls `workflow_phase` before each transition. The tool selects the
-`workflow/auto` virtual model, then routes the **next response** to the right
-physical model. In particular, the implementer signals `review` before
-presenting its result or asking you to resolve a design question. Writing a
-pseudocode file does not automatically trigger implementation. The skill also
-works with an explicitly disabled classifier (`"classifier": null`).
+The skill calls `model_switcher_phase` before each transition. The tool selects
+the `model-switcher/auto` virtual model, then routes the **next response** to the
+right physical model. Skeleton discussion stays in planning. The agent signals
+`review` before presenting completed work or asking you to resolve a design
+question during implementation. Writing or publishing a skeleton does not
+automatically trigger implementation. The skill also works with an explicitly disabled classifier
+(`"classifier": null`).
 
 ### Optional Jev detection
 
 When a phase was not explicitly signaled, automatic routing asks the configured
 classifier which phase the next response needs. Authenticate its provider through
 Pi (`/login typesafe` for the default), or set `classifier` to an exact classifier
-ID from another supported provider. No credential is stored in `workflow.json`.
+ID from another supported provider. No credential is stored in
+`model-switcher.json`.
 
 Jev receives the current phase, the latest user message, and bounded text from up
 to eight recent messages. This **can include private conversation text, code, and
@@ -105,21 +133,39 @@ still occur, especially if the implementation model has a smaller context window
 ### Manual controls
 
 ```text
-/workflow                 # Show selection, phase, routing mode, and configured models
-/workflow interactive     # Pin the interactive model
-/workflow implementation  # Pin the implementation model; this is not approval
-/workflow auto            # Resume phase-based routing (or select it directly)
-/workflow off             # Select the interactive physical model without routing
+/model-switcher                 # Show selection, phase, routing mode, and configured models
+/model-switcher interactive     # Pin the interactive model
+/model-switcher implementation  # Pin the implementation model; this is not approval
+/model-switcher auto            # Resume phase-based routing (or select it directly)
+/model-switcher off             # Select the interactive physical model without routing
 ```
 
 Overrides take precedence over the classifier and agent phase signals until you
 select `auto`. Phase state and overrides follow the session branch and survive
 resume and compaction. Forking from an earlier point restores that point's state.
-No operation clears or rewrites the planning history. `/workflow off` does not
-remove the skill from the conversation; tell the agent if you also want to stop
-following the pseudocode workflow.
+No operation clears or rewrites the planning history. `/model-switcher off` does
+not remove the skill from the conversation; tell the agent if you also want to
+stop following the pseudocode workflow.
 
 After installing or updating the package, run `/reload` or start a new Pi session.
+
+### Upgrade from the old names
+
+If you configured explicit extension or resource paths, update them to
+`model-switcher.ts` and `model-switcher/`. Use `/model-switcher` and
+`model_switcher_phase` in place of the old command and tool names.
+
+The extension reads `~/.pi/agent/workflow.json` only when
+`~/.pi/agent/model-switcher.json` is absent. Saving the model pair with
+`/model-switcher models <interactive-provider/model> <implementation-provider/model>`
+writes the new file and preserves the existing classifier choice, including
+`null`. If both files exist, the new file takes precedence. These paths use
+`PI_CODING_AGENT_DIR` when set.
+
+The old `workflow/auto` virtual model is no longer registered. After updating and
+reloading, select `/model-switcher auto` in an old session to restore its saved
+phase state under `model-switcher/auto`. This resumes automatic routing; reapply
+an interactive or implementation pin if needed. The conversation is preserved.
 
 ## Background agents
 
@@ -197,8 +243,8 @@ cover assistant backgrounds across session switches, repeated lifecycle events,
 and non-TUI sessions. Background-agent tests use offline fixture providers and
 real RPC child processes to check discovery, persistence, parent restart/death,
 child crashes, torn JSONL tails, writer exclusion, idle cleanup, and recovery.
-They do not make external model requests. Workflow tests cover phase routing,
-classifier failure/uncertainty, manual overrides, context preservation, and the
-real Pi runtime with offline fixture providers. The lockfile pins development
+They do not make external model requests. Model-switcher tests cover phase
+routing, classifier failure/uncertainty, manual overrides, context preservation,
+and the real Pi runtime with offline fixture providers. The lockfile pins development
 peers to the tested Pi version; Pi supplies its own host modules when loading the
 installed extension.

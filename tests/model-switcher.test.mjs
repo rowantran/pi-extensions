@@ -1,15 +1,15 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
-import workflow, { classifierContext } from "../workflow.ts";
-import { configPath, modelRef, readConfig } from "../workflow/config.ts";
+import modelSwitcher, { classifierContext } from "../model-switcher.ts";
+import { configPath, modelRef, readConfig } from "../model-switcher/config.ts";
 
 const primary = { provider: "test", id: "interactive", api: "openai-completions" };
 const secondary = { provider: "test", id: "implementation", api: "openai-completions" };
-const virtual = { provider: "workflow", id: "auto", api: "pi-virtual" };
+const virtual = { provider: "model-switcher", id: "auto", api: "pi-virtual" };
 const classifier = { provider: "typesafe", id: "jev-latest", type: "classifier" };
 const user = (content) => ({ role: "user", content, timestamp: 1 });
 const assistant = (text) => ({ role: "assistant", content: [{ type: "text", text }], timestamp: 2 });
@@ -18,7 +18,7 @@ const choice = (phase, probability = 0.99) => ({
 });
 
 function setup(t, options = {}) {
-	const root = mkdtempSync(join(tmpdir(), "pi-workflow-test-"));
+	const root = mkdtempSync(join(tmpdir(), "pi-model-switcher-test-"));
 	const old = process.env.PI_CODING_AGENT_DIR;
 	process.env.PI_CODING_AGENT_DIR = root;
 	t.after(() => { if (old === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = old; rmSync(root, { recursive: true, force: true }); });
@@ -53,19 +53,19 @@ function setup(t, options = {}) {
 		getThinkingLevel: () => thinking,
 		setThinkingLevel: (level) => { thinking = level; },
 	};
-	workflow(api);
+	modelSwitcher(api);
 	function state() {
 		return manager.getBranch().filter((entry) => entry.type === "custom" && entry.customType === "pi.virtual-model-state").at(-1)?.data.state;
 	}
 	return {
-		root, manager, ctx, notices, selections, calls, available, tools, definition, events, api,
+		root, manager, ctx, notices, selections, calls, available, commands, tools, definition, events, api,
 		answer(value) { response = value; },
-		command(args) { return commands.get("workflow").handler(args, ctx); },
-		phase(value, signal) { return tools.get("workflow_phase").execute("test", { phase: value }, signal, undefined, ctx); },
+		command(args) { return commands.get("model-switcher").handler(args, ctx); },
+		phase(value, signal) { return tools.get("model_switcher_phase").execute("test", { phase: value }, signal, undefined, ctx); },
 		async route(overrides = {}) {
 			const request = { model: virtual, reason: "user", thinkingLevel: "high", messages: [user("Discuss the design")], state: state(), ...overrides };
 			const result = await definition.route(request, ctx);
-			if (result.state && result.state !== request.state && request.reason !== "direct") manager.appendCustomEntry("pi.virtual-model-state", { provider: "workflow", modelId: "auto", state: result.state });
+			if (result.state && result.state !== request.state && request.reason !== "direct") manager.appendCustomEntry("pi.virtual-model-state", { provider: "model-switcher", modelId: "auto", state: result.state });
 			return result;
 		},
 	};
@@ -73,8 +73,12 @@ function setup(t, options = {}) {
 
 test("registration is inert: no config, model changes, classification, or context hooks", (t) => {
 	const h = setup(t, { noConfig: true });
-	assert.equal(h.definition.provider, "workflow");
+	assert.equal(h.definition.provider, "model-switcher");
 	assert.equal(h.definition.id, "auto");
+	assert.equal(h.definition.name, "Model switcher");
+	assert.deepEqual([...h.commands.keys()], ["model-switcher"]);
+	assert.deepEqual([...h.tools.keys()], ["model_switcher_phase"]);
+	assert.equal(configPath(), join(h.root, "model-switcher.json"));
 	assert.equal(h.selections.length, 0);
 	assert.equal(h.calls.length, 0);
 	assert.equal(h.manager.getBranch().length, 0);
@@ -100,7 +104,7 @@ test("phase activation preserves thinking and does not reselect an already activ
 	h.api.setThinkingLevel("xhigh");
 	await h.phase("implementation");
 	await h.command("interactive");
-	assert.equal(h.selections.length, 1, "phase signals and overrides do not reselect workflow/auto");
+	assert.equal(h.selections.length, 1, "phase signals and overrides do not reselect model-switcher/auto");
 	assert.equal(h.api.getThinkingLevel(), "xhigh");
 });
 
@@ -145,12 +149,20 @@ test("Jev can detect both implementation and interactive review", async (t) => {
 	assert.equal(h.calls[1].context.state.currentPhase, "implementation");
 });
 
-test("pseudocode writes do not automatically trigger implementation", async (t) => {
+test("in-place pseudocode edits, commits, and draft PR publication do not trigger implementation", async (t) => {
 	const h = setup(t, { noClassifier: true });
-	const messages = [user("Design it first"), { role: "toolResult", toolName: "write", content: [{ type: "text", text: "Wrote plans/task.md" }], isError: false }];
-	const result = await h.route({ reason: "continuation", messages });
-	assert.equal(result.model, primary);
-	assert.equal(result.state.phase, "planning");
+	const messages = [user("Design it first; wait for approval of the skeleton commit")];
+	for (const [toolName, text] of [
+		["write", "Wrote pseudocode stubs in src/cache.ts"],
+		["edit", "Updated the existing src/service.ts contract"],
+		["bash", "Committed and pushed the skeleton as the first task commit"],
+		["bash", "Opened draft PR https://example.invalid/pull/1"],
+	]) {
+		messages.push({ role: "toolResult", toolName, content: [{ type: "text", text }], isError: false });
+		const result = await h.route({ reason: "continuation", messages });
+		assert.equal(result.model, primary);
+		assert.equal(result.state.phase, "planning");
+	}
 });
 
 test("uncertain, malformed, failed, and unavailable classifiers preserve the phase", async (t) => {
@@ -213,6 +225,43 @@ test("branch navigation restores phase signals and overrides from that branch on
 	const result = await h.route();
 	assert.equal(result.model, primary);
 	assert.equal(result.state.phase, "planning");
+});
+
+test("renamed router reads legacy branch state and consumed signals without replaying them", async (t) => {
+	const h = setup(t, { classifier: null });
+	const userId = h.manager.appendMessage(user("Approved, implement it"));
+	const signalId = h.manager.appendCustomEntry("workflow.phase", { phase: "planning", userId });
+	const legacy = { phase: "implementation", signalId };
+	h.manager.appendCustomEntry("pi.virtual-model-state", { provider: "workflow", modelId: "auto", state: legacy });
+	const oldBranch = h.manager.getBranch().slice();
+	await h.command("auto");
+	const result = await h.route({ state: undefined });
+	assert.equal(result.model, secondary);
+	assert.deepEqual(result.state, legacy, "the last classified phase wins over the consumed planning signal");
+	assert.equal(h.manager.getBranch().at(-1).data.provider, "model-switcher");
+	assert.deepEqual(h.manager.getBranch().slice(0, oldBranch.length), oldBranch, "existing history stays unchanged");
+
+	await h.phase("review");
+	const review = await h.route();
+	assert.equal(review.model, primary);
+	assert.equal(review.state.phase, "review");
+});
+
+test("legacy pending signals and overrides yield to newer model-switcher controls on the same branch", async (t) => {
+	const h = setup(t, { classifier: null });
+	const userId = h.manager.appendMessage(user("Approved, implement it"));
+	h.manager.appendCustomEntry("workflow.phase", { phase: "implementation", userId });
+	h.manager.appendCustomEntry("workflow.override", { mode: "interactive" });
+	const branch = h.manager.getLeafId();
+	const pending = await h.route({ state: undefined });
+	assert.equal(pending.state.phase, "implementation");
+	assert.equal(pending.model, primary, "legacy override still wins over the signal");
+	await h.command("auto");
+	assert.equal((await h.route()).model, secondary);
+	await h.phase("review");
+	assert.equal((await h.route()).state.phase, "review");
+	h.manager.branch(branch);
+	assert.equal((await h.route({ state: undefined })).model, primary, "new overrides on another branch do not leak into the old branch");
 });
 
 test("compaction retains phase state and does not change routing policy", async (t) => {
@@ -291,7 +340,7 @@ test("models command validates refs, rejects virtual models, and stores config o
 	assert.deepEqual(readConfig(), { interactive: "test/interactive", implementation: "test/implementation", classifier: "typesafe/jev-latest" });
 	assert.equal(h.selections.length, 0, "configuration does not change the selected/default model");
 	const original = readFileSync(configPath(), "utf8");
-	await h.command("models workflow/auto test/implementation");
+	await h.command("models model-switcher/auto test/implementation");
 	assert.equal(h.notices.at(-1).level, "error");
 	assert.equal(readFileSync(configPath(), "utf8"), original);
 	assert.deepEqual(modelRef("openrouter/company/model"), ["openrouter", "company/model"]);
@@ -303,9 +352,49 @@ test("configuration validation rejects unknown keys and preserves an explicitly 
 	await h.command("models test/interactive test/implementation");
 	assert.equal(readConfig().classifier, null);
 	writeFileSync(configPath(), '{"interactive":"test/interactive","implementation":"test/implementation","typo":true}');
-	assert.throws(readConfig, /Invalid workflow configuration/);
+	assert.throws(readConfig, /Invalid model-switcher configuration/);
 	await h.command("models test/interactive test/implementation");
 	assert.equal(h.notices.at(-1).level, "error", "do not silently overwrite malformed configuration");
+});
+
+test("legacy settings remain readable; saving the model pair uses the new file and preserves the classifier", async (t) => {
+	const h = setup(t, { noConfig: true });
+	const oldPath = join(h.root, "workflow.json");
+	for (const classifier of [null, "other/custom-classifier"]) {
+		rmSync(configPath(), { force: true });
+		const legacy = { interactive: "test/interactive", implementation: "test/implementation", classifier };
+		const original = JSON.stringify(legacy);
+		writeFileSync(oldPath, original);
+		assert.deepEqual(readConfig(), legacy);
+		assert.equal(existsSync(configPath()), false, "reading must not mutate settings");
+		await h.command("models test/implementation test/interactive");
+		assert.equal(h.notices.at(-1).level, "info");
+		assert.deepEqual(readConfig(), { interactive: "test/implementation", implementation: "test/interactive", classifier });
+		assert.equal(readFileSync(oldPath, "utf8"), original, "keep the old file untouched");
+		assert.equal(statSync(configPath()).mode & 0o777, 0o600);
+	}
+});
+
+test("new configuration takes precedence and invalid settings never silently fall back or get overwritten", async (t) => {
+	const h = setup(t, { classifier: null });
+	const oldPath = join(h.root, "workflow.json");
+	writeFileSync(oldPath, JSON.stringify({ interactive: "old/planner", implementation: "old/builder", classifier: "other/classifier" }));
+	assert.equal(readConfig().classifier, null);
+	for (const invalid of ["{broken", '{"interactive":"test/interactive","implementation":"test/implementation","typo":true}']) {
+		writeFileSync(configPath(), invalid);
+		assert.throws(readConfig);
+		await h.command("models test/interactive test/implementation");
+		assert.equal(h.notices.at(-1).level, "error");
+		assert.equal(readFileSync(configPath(), "utf8"), invalid);
+	}
+	rmSync(configPath());
+	writeFileSync(oldPath, "{broken");
+	assert.throws(readConfig, /workflow\.json/);
+	await h.command("models test/interactive test/implementation");
+	assert.equal(h.notices.at(-1).level, "error");
+	assert.equal(existsSync(configPath()), false);
+	rmSync(oldPath);
+	assert.throws(readConfig, /Configure routing first: \/model-switcher models/);
 });
 
 test("off selects the interactive physical model and preserves the session", async (t) => {
