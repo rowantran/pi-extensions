@@ -67,10 +67,8 @@ export default function modelSwitcher(pi: ExtensionAPI) {
 				try {
 					const classifier = config.classifier && ctx.modelRegistry.findOfType("classifier", ...modelRef(config.classifier));
 					if (!classifier) throw new Error("Classifier unavailable or disabled");
-					const signal = AbortSignal.any([...(request.signal ? [request.signal] : []), AbortSignal.timeout(1500)]);
-					const result = await ctx.modelRegistry.classify(classifier, classifierContext(request, state.phase), { signal });
+					const result = await ctx.modelRegistry.classify(classifier, classifierContext(request, state.phase), { signal: request.signal });
 					request.signal?.throwIfAborted();
-					signal.throwIfAborted();
 					if (result.stopReason !== "stop") throw new Error("Classifier request failed");
 					const answer = result.answers.nextPhase;
 					if (answer?.type === "choice" && phase(answer.choice)

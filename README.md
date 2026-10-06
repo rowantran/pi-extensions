@@ -132,8 +132,8 @@ the normal conversation.
 
 An uncertain decision keeps the current phase. An unavailable, disabled
 (`"classifier": null`), or failed classifier also keeps the current phase and
-warns once per session when a UI is available. Classification has a 1.5-second
-timeout; a timeout keeps the current phase and does not cancel the user request.
+warns once per session when a UI is available. Classification has no local
+timeout; cancelling the user request also cancels classification.
 Without a saved phase, routing starts on the interactive model.
 **There is no explicit phase-tool fallback anymore.** If classification cannot
 run, choose a model manually through `/model`.

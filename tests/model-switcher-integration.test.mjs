@@ -485,7 +485,7 @@ test("classifier failures, unavailable models, and disabled classification retai
 	await implement(f, session);
 	const states = structuredClone(routerStates(session));
 	await f.prompt(session, "Another failure retains implementation.", [{ stopReason: "error", errorMessage: "different provider failure" }], chat("implementation"));
-	await f.prompt(session, "Classifier-local timeout retains implementation.", [{ stopReason: "aborted", errorMessage: "classifier timeout" }], chat("implementation"));
+	await f.prompt(session, "Provider-aborted classification retains implementation.", [{ stopReason: "aborted", errorMessage: "provider aborted" }], chat("implementation"));
 	f.writeConfig({ classifier: "model-switcher-test-missing/absent" });
 	await f.prompt(session, "Unavailable classifier retains implementation.", [], chat("implementation"));
 	f.writeConfig({ classifier: null });

@@ -195,45 +195,33 @@ test("an aborted request is not converted into fallback work", async (t) => {
 	before.abort();
 	await assert.rejects(h.route({ signal: before.signal }), { name: "AbortError" });
 	assert.equal(h.calls.length, 0);
-	const during = new AbortController();
-	h.answer(() => { during.abort(); return { stopReason: "aborted", answers: {} }; });
-	await assert.rejects(h.route({ signal: during.signal }), { name: "AbortError" });
+	for (const response of [{ stopReason: "aborted", answers: {} }, choice("implementation")]) {
+		const during = new AbortController();
+		h.answer(() => { during.abort(); return response; });
+		await assert.rejects(h.route({ signal: during.signal }), { name: "AbortError" });
+	}
 	assert.equal(h.notices.length, 0, "cancellation is not a provider warning");
 });
 
-test("the 1.5-second classifier deadline retains phase, including when a provider returns a late decision", async (t) => {
+test("classification waits for its result without a local timeout and forwards only request cancellation", async (t) => {
 	const h = setup(t);
-	let deadline;
-	const timeouts = [];
-	t.mock.method(AbortSignal, "timeout", (ms) => {
-		timeouts.push(ms);
-		deadline = new AbortController();
-		return deadline.signal;
-	});
-	for (const [state, model] of [[undefined, primary], [{ phase: "implementation" }, secondary]]) {
-		for (const lateDecision of [false, true]) {
-			const started = Promise.withResolvers();
-			h.answer(async ({ signal }) => {
-				const aborted = new Promise((resolve) => signal.addEventListener("abort", resolve, { once: true }));
-				started.resolve(signal);
-				await aborted;
-				return lateDecision ? choice("review") : { stopReason: "aborted", answers: {} };
-			});
-			const parent = new AbortController();
-			const pending = h.route({ state, signal: parent.signal });
-			const signal = await started.promise;
-			assert.equal(signal.aborted, false);
-			deadline.abort(new DOMException("Classifier deadline exceeded", "TimeoutError"));
-			const result = await pending;
-			assert.equal(signal.aborted, true);
-			assert.equal(parent.signal.aborted, false, "Local timeout does not cancel the user's request");
-			assert.equal(result.model, model);
-			if (state) assert.equal(result.state, state);
-			else assert.deepEqual(result.state, { phase: "planning" });
-		}
+	const timeout = t.mock.method(AbortSignal, "timeout", () => new AbortController().signal);
+	for (const signal of [undefined, new AbortController().signal]) {
+		const started = Promise.withResolvers();
+		const response = Promise.withResolvers();
+		h.answer((opts) => {
+			started.resolve(opts.signal);
+			return response.promise;
+		});
+		const pending = h.route({ state: { phase: "planning" }, signal });
+		assert.equal(await started.promise, signal, "No local timeout signal is added");
+		response.resolve(choice("implementation"));
+		const result = await pending;
+		assert.equal(result.model, secondary);
+		assert.deepEqual(result.state, { phase: "implementation" });
 	}
-	assert.deepEqual(timeouts, [1500, 1500, 1500, 1500]);
-	assert.equal(h.notices.length, 1);
+	assert.equal(timeout.mock.callCount(), 0);
+	assert.equal(h.notices.length, 0);
 });
 
 test("classifier projection is bounded, strips private blocks, and never mutates model context", () => {
