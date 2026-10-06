@@ -49,6 +49,12 @@ The `model-switcher.ts` extension and its `model-switcher/` resources route each
 phase to the configured model. There is no separate handoff document, worker
 session, or context reset.
 
+The skill owns the work instructions. The switcher only selects models: its
+phase tool returns routing status such as `{"phase":"planning","override":"auto"}`,
+not instructions to create PRs, implement, test, or review. Its classifier prompt
+is sent only to the classifier. Changing models does not reload the skill or
+append phase-specific work instructions.
+
 ### Agree on a committed skeleton
 
 The agent writes pseudocode and stubs at the real implementation paths. The
@@ -106,8 +112,8 @@ the `model-switcher/auto` virtual model, then routes the **next response** to th
 right physical model. Skeleton discussion stays in planning. The agent signals
 `review` before presenting completed work or asking you to resolve a design
 question during implementation. Writing or publishing a skeleton does not
-automatically trigger implementation. The skill also works with an explicitly disabled classifier
-(`"classifier": null`).
+automatically trigger implementation. The skill also works with an explicitly
+disabled classifier (`"classifier": null`).
 
 ### Optional Jev detection
 
@@ -129,6 +135,24 @@ Explicit phase signals still work without Jev, so missing classifier credentials
 do not block the workflow. Retries retain the original physical model; compaction
 requests do not classify or change the workflow phase. Pi's normal compaction can
 still occur, especially if the implementation model has a smaller context window.
+
+### Compared with Pi's example
+
+[Pi's basic virtual-model example](https://pi.dev/docs/latest/virtual-models)
+chooses a model from the thinking level and keeps follow-up requests on that
+model. The linked Jev example classifies the initial task, then switches once
+on the first successful file edit. Neither policy detects a return to interactive
+review, and switching on the first edit would treat a pseudocode edit as
+implementation.
+
+This extension adds ongoing phase classification, bounded classifier input and
+failure handling, plus a separate explicit phase tool. The tool, manual pins,
+configuration commands, status UI, and old-name compatibility account for much
+of the extra code; they are not requirements of Pi's virtual-model API. Pi itself
+preserves the conversation and returned router state. The explicit phase tool
+also allows switching when the classifier is unavailable. Replacing both routing
+controls with classifier-only routing would simplify the extension, but would
+remove that fallback and needs a working classifier.
 
 ### Manual controls
 

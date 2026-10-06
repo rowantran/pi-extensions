@@ -169,7 +169,8 @@ export default function modelSwitcher(pi: ExtensionAPI) {
 			pi.appendEntry(SIGNAL, { phase: params.phase, userId });
 			const { override } = controls(ctx.sessionManager.getBranch());
 			status(ctx, params.phase, override);
-			return { content: [{ type: "text", text: prompts.phaseMessages[params.phase] }], details: { phase: params.phase, override } };
+			const details = { phase: params.phase, override };
+			return { content: [{ type: "text", text: JSON.stringify(details) }], details };
 		},
 	});
 
@@ -189,7 +190,7 @@ export default function modelSwitcher(pi: ExtensionAPI) {
 				} else if (["auto", "interactive", "implementation"].includes(command) && rest.length === 0) {
 					await activate(ctx);
 					pi.appendEntry(OVERRIDE, { mode: command });
-					ctx.ui.notify(`Model switcher routing: ${command}. This changes model routing, not implementation approval.`, "info");
+					ctx.ui.notify(`Model switcher routing: ${command}.`, "info");
 				} else if (command === "status" && rest.length === 0) {
 					const branch = ctx.sessionManager.getBranch();
 					const { signal, override } = controls(branch);

@@ -97,6 +97,20 @@ test("explicit phase signals route planning -> implementation -> review before t
 	assert.equal(h.calls.length, 0, "explicit phase transitions do not need a classifier call");
 });
 
+test("phase tools return routing status only, including manual overrides, without work instructions", async (t) => {
+	const h = setup(t, { classifier: null });
+	for (const override of ["auto", "interactive", "implementation"]) {
+		await h.command(override);
+		for (const phase of ["planning", "implementation", "review"]) {
+			const result = await h.phase(phase);
+			assert.deepEqual(result, {
+				content: [{ type: "text", text: JSON.stringify({ phase, override }) }],
+				details: { phase, override },
+			});
+		}
+	}
+});
+
 test("phase activation preserves thinking and does not reselect an already active virtual model", async (t) => {
 	const h = setup(t);
 	await h.phase("planning");

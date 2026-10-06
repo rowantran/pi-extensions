@@ -251,9 +251,13 @@ test("real phase tool routes planning → implementation → review without losi
 		models.primary.provider, models.secondary.provider, models.secondary.provider, models.primary.provider,
 	]);
 	const results = session.messages.filter((message) => message.role === "toolResult");
-	assert.deepEqual(results.map((message) => message.details), [
+	const statuses = [
 		{ phase: "planning", override: "auto" }, { phase: "implementation", override: "auto" }, { phase: "review", override: "auto" },
-	]);
+	];
+	assert.deepEqual(results.map((message) => message.details), statuses);
+	assert.deepEqual(results.map((message) => message.content), statuses.map((status) => [
+		{ type: "text", text: JSON.stringify(status) },
+	]), "phase changes add only routing status to the conversation, never work instructions");
 	assert.deepEqual(customEntries(session, "model-switcher.phase").map((entry) => entry.data.phase), ["planning", "implementation", "review"]);
 	assert.deepEqual(routerStates(session).map((entry) => entry.data.state.phase), ["planning", "implementation", "review"]);
 	assert.equal(session.sessionManager.getBranch().some((entry) => entry.type === "compaction"), false);
