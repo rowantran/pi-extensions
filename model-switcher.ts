@@ -51,9 +51,11 @@ export default function modelSwitcher(pi: ExtensionAPI) {
 		thinkingLevels: ["off", "minimal", "low", "medium", "high", "xhigh", "max"],
 		async route(request, ctx) {
 			request.signal?.throwIfAborted();
-			// Retrying a failed request must reuse its model, not reclassify it.
-			if (request.reason === "retry" && request.failed) {
-				return { model: request.failed.model, thinkingLevel: request.failed.thinkingLevel ?? request.thinkingLevel, state: request.state };
+			// Tool follow-ups and retries reuse the dispatched model and thinking
+			// level, even if configuration changed since the turn began.
+			const sticky = request.failed ?? request.previous;
+			if ((request.reason === "continuation" || request.reason === "retry") && sticky) {
+				return { model: sticky.model, thinkingLevel: sticky.thinkingLevel ?? request.thinkingLevel, state: request.state };
 			}
 			const config = readConfig();
 			// Compaction and other direct calls do not have or change router state.
@@ -61,13 +63,14 @@ export default function modelSwitcher(pi: ExtensionAPI) {
 				return { model: request.previous?.model ?? physicalModel(ctx, config.interactive), thinkingLevel: request.thinkingLevel };
 			}
 			let state = request.state && phase(request.state.phase) ? request.state : { phase: "planning" as Phase };
-			if (request.reason !== "retry") {
+			if (request.reason === "user") {
 				try {
 					const classifier = config.classifier && ctx.modelRegistry.findOfType("classifier", ...modelRef(config.classifier));
 					if (!classifier) throw new Error("Classifier unavailable or disabled");
-					const signal = AbortSignal.any([...(request.signal ? [request.signal] : []), AbortSignal.timeout(5000)]);
+					const signal = AbortSignal.any([...(request.signal ? [request.signal] : []), AbortSignal.timeout(1500)]);
 					const result = await ctx.modelRegistry.classify(classifier, classifierContext(request, state.phase), { signal });
 					request.signal?.throwIfAborted();
+					signal.throwIfAborted();
 					if (result.stopReason !== "stop") throw new Error("Classifier request failed");
 					const answer = result.answers.nextPhase;
 					if (answer?.type === "choice" && phase(answer.choice)
