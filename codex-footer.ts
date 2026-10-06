@@ -1,4 +1,4 @@
-import type { ContextUsage, ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
+import type { ContextUsage, ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { homedir } from "node:os";
 import { isAbsolute, relative, resolve, sep } from "node:path";
@@ -9,6 +9,38 @@ const SEPARATOR = " · ";
 // Extension statuses shown on the main line right after the model, instead of
 // on the status line below.
 const MODEL_STATUS_KEYS = ["isara-fast"];
+// Shown before the model when a virtual model (such as model-switcher/auto)
+// picks the physical model for each request.
+const VIRTUAL_MODEL_BADGE = "[A]";
+
+type FooterModel = { model: ExtensionContext["model"]; thinkingLevel: string | undefined; virtual: boolean };
+
+/**
+ * The model to show. For a virtual model this is the physical model of the
+ * latest successful response since it was selected, like Pi's built-in footer;
+ * before the first such response it is the virtual model itself.
+ */
+export function footerModel(ctx: ExtensionContext): FooterModel {
+	const selected = ctx.model;
+	if (!selected || selected.api !== "pi-virtual") {
+		return { model: selected, thinkingLevel: ctx.thinkingLevel, virtual: false };
+	}
+	const branch = ctx.sessionManager.getBranch();
+	for (let i = branch.length - 1; i >= 0; i--) {
+		const entry = branch[i];
+		// Responses before the virtual model was selected say nothing about its routing.
+		if (entry.type === "model_change") break;
+		if (entry.type !== "message" || entry.message.role !== "assistant") continue;
+		const message = entry.message;
+		if (message.stopReason === "error" || message.stopReason === "aborted") continue;
+		const routed = ctx.modelRegistry.find(message.provider, message.model);
+		if (routed && routed.api !== "pi-virtual") {
+			return { model: routed, thinkingLevel: message.thinkingLevel ?? ctx.thinkingLevel, virtual: true };
+		}
+		break;
+	}
+	return { model: selected, thinkingLevel: ctx.thinkingLevel, virtual: true };
+}
 
 // Light red. Themes have no light red color, so use a fixed color.
 function lightRed(theme: Theme, text: string): string {
@@ -136,14 +168,16 @@ export default function codexFooter(pi: ExtensionAPI): void {
 						}
 					}
 
-					const modelName = ctx.model?.id ?? "no-model";
+					const { model, thinkingLevel, virtual } = footerModel(ctx);
+					const modelName = model?.id ?? "no-model";
 					const providerPrefix =
-						ctx.model && footerData.getAvailableProviderCount() > 1
-							? `(${ctx.model.provider}) `
+						model && footerData.getAvailableProviderCount() > 1
+							? `(${model.provider}) `
 							: "";
-					const thinking = ctx.model?.reasoning ? ` ${ctx.thinkingLevel ?? "off"}` : "";
+					const thinking = model?.reasoning ? ` ${thinkingLevel ?? "off"}` : "";
+					const badge = virtual ? `${theme.fg("accent", VIRTUAL_MODEL_BADGE)} ` : "";
 					const contextUsage = ctx.getContextUsage();
-					const contextWindow = contextUsage?.contextWindow ?? ctx.model?.contextWindow;
+					const contextWindow = contextUsage?.contextWindow ?? model?.contextWindow;
 					const contextMax = contextWindow ? ` (${formatTokens(contextWindow)} ctx)` : "";
 					const branch = footerData.getGitBranch();
 					const workspace = branch ? `${formatCwd(ctx.cwd)} (${branch})` : formatCwd(ctx.cwd);
@@ -152,7 +186,7 @@ export default function codexFooter(pi: ExtensionAPI): void {
 						.filter(Boolean)
 						.map((text) => lightRed(theme, text));
 					const mainSegments = [
-						theme.fg("warning", `${providerPrefix}${modelName}${thinking}${contextMax}`),
+						badge + theme.fg("warning", `${providerPrefix}${modelName}${thinking}${contextMax}`),
 						...modelStatuses,
 						contextSegment(theme, contextUsage),
 						theme.fg("success", workspace),
@@ -167,8 +201,8 @@ export default function codexFooter(pi: ExtensionAPI): void {
 
 					const otherSegments: string[] = [];
 					const usingSubscription =
-						ctx.model !== undefined &&
-						(ctx.model.provider === "kimi-coding" || ctx.modelRegistry.isUsingOAuth(ctx.model));
+						model !== undefined &&
+						(model.provider === "kimi-coding" || ctx.modelRegistry.isUsingOAuth(model));
 					if (totalCost || usingSubscription) {
 						const subscriptionLabel = usingSubscription ? " (sub)" : "";
 						otherSegments.push(theme.fg("dim", `$${totalCost.toFixed(3)}${subscriptionLabel}`));
