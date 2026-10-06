@@ -125,7 +125,7 @@ async function fakeClassifier(f, model, context, options) {
 	const step = f.classifierSteps.shift();
 	f.classifications.push({ model: { provider: model.provider, id: model.id, api: model.api }, context: structuredClone(context), signal: options?.signal });
 	try {
-		assert.ok(step, "Unexpected classifier request (retries, direct requests, and physical selections must not classify)");
+		assert.ok(step, "Unexpected classifier request (tool continuations, retries, direct requests, and physical selections must not classify)");
 		assert.deepEqual({ provider: model.provider, id: model.id, api: model.api }, classifier);
 		assert.equal(context.questions.nextPhase.type, "choice");
 		assert.deepEqual(Object.keys(context.questions.nextPhase.criteria).sort(), ["implementation", "planning", "review"]);
@@ -259,7 +259,7 @@ function fixture(t, { legacyConfig = false, classifierSetting = classifierRef, r
 		f.chatSteps.push(...responses);
 		await session.prompt(prompt);
 		assert.equal(f.chatSteps.length, 0, "Pi must make every expected chat/tool continuation request");
-		assert.equal(f.classifierSteps.length, 0, "Pi must classify every ordinary user/continuation request");
+		assert.equal(f.classifierSteps.length, 0, "Pi must classify each expected user request");
 		assert.deepEqual(f.providerErrors, []);
 		assert.deepEqual(f.extensionErrors, []);
 		const last = session.messages.at(-1);
@@ -298,13 +298,13 @@ test("package registers only auto routing; explicit skill use does not activate 
 	const runtime = services.modelRuntime;
 	assert.deepEqual(runtime.getModels("model-switcher").map((model) => model.id), ["auto"]);
 	assert.equal(runtime.getModel("workflow", "auto"), undefined, "No legacy virtual alias");
-	assert.doesNotMatch(session.systemPrompt, /<name>pseudocode<\/name>|Agree on pseudocode, then implement/);
+	assert.doesNotMatch(session.systemPrompt, /<name>pseudocode<\/name>|<skill name="pseudocode"/);
 	await f.prompt(session, "An ordinary question.", [], chat("interactive"));
-	assert.doesNotMatch(JSON.stringify(f.calls[0].messages), /Agree on pseudocode, then implement/);
+	assert.equal(f.calls[0].messages.some((message) => textOf(message).includes('<skill name="pseudocode"')), false);
 	await f.select(session, services, models.implementation.provider, models.implementation.id);
 	await f.prompt(session, `/skill:pseudocode ${goal}`, [], chat("implementation", "Plan without changing the user's selected model."));
 	assert.equal(session.model.provider, models.implementation.provider);
-	assert.match(textOf(userMessages(session.messages).at(-1)), /Agree on pseudocode, then implement/);
+	assert.match(textOf(userMessages(session.messages).at(-1)), /<skill name="pseudocode" location=/);
 	assert.ok(textOf(userMessages(session.messages).at(-1)).includes(goal));
 	assert.deepEqual(f.classifications, []);
 	assert.deepEqual(routerStates(session), []);
@@ -324,7 +324,7 @@ test("package registers only auto routing; explicit skill use does not activate 
 	assert.equal(services.settingsManager.getDefaultModel(), models.interactive.id);
 });
 
-test("classifier transitions preserve the same planning dialogue, including a real read-tool continuation", { timeout: 30000 }, async (t) => {
+test("user decisions preserve planning dialogue while real tool continuations keep the same model", { timeout: 30000 }, async (t) => {
 	const f = fixture(t);
 	const { session, services } = await f.open();
 	await f.select(session, services);
@@ -337,8 +337,14 @@ test("classifier transitions preserve the same planning dialogue, including a re
 	const path = join(f.cwd, "verification.txt");
 	writeFileSync(path, evidence);
 	session.setThinkingLevel("medium");
-	await f.prompt(session, approval, [decision("implementation", 0.8), decision("review")],
-		{ model: "implementation", read: path }, chat("interactive", "Review: the implementation matches the approved design."));
+	await f.prompt(session, approval, [decision("implementation", 0.8)],
+		{ model: "implementation", read: path }, { model: "implementation", read: path },
+		chat("implementation", "Implementation and verification are complete."));
+	assert.equal(f.classifications.length, 3, "Two tool follow-ups reuse the user decision without classifying");
+	assert.deepEqual(routerStates(session).map((entry) => entry.data.state.phase), ["planning", "implementation"], "Review evidence does not switch models mid-turn");
+	const reviewRequest = "Review the completed implementation.";
+	await f.prompt(session, reviewRequest, [decision("review")],
+		chat("interactive", "Review: the implementation matches the approved design."));
 	assertPlanningPreserved(f.calls.slice(start), planning);
 	for (const call of f.calls.slice(start)) {
 		assert.ok(call.messages.some((message) => textOf(message).includes("Which eviction order should it use?")));
@@ -347,13 +353,14 @@ test("classifier transitions preserve the same planning dialogue, including a re
 	assert.equal(session.sessionId, sessionId);
 	assert.equal(session.thinkingLevel, "medium");
 	assertVirtualSelection(session);
-	assert.deepEqual(f.calls.map((call) => call.model.provider), [models.interactive.provider, models.interactive.provider, models.implementation.provider, models.interactive.provider]);
-	assert.deepEqual(f.calls.slice(start).map((call) => call.thinking), ["medium", "medium"]);
-	assert.deepEqual(f.classifications.map((call) => call.context.state.requestReason), ["user", "user", "user", "continuation"]);
-	const continuation = f.classifications.at(-1).context.state;
-	assert.equal(continuation.currentPhase, "implementation");
-	assert.equal(continuation.latestUserMessage, approval);
-	assert.ok(continuation.recentMessages.some((message) => message.role === "toolResult" && message.toolName === "read" && !message.isError && message.text.includes(evidence)));
+	assert.deepEqual(f.calls.map((call) => call.model.provider), [models.interactive.provider, models.interactive.provider,
+		models.implementation.provider, models.implementation.provider, models.implementation.provider, models.interactive.provider]);
+	assert.deepEqual(f.calls.slice(start).map((call) => call.thinking), ["medium", "medium", "medium", "medium"]);
+	assert.deepEqual(f.classifications.map((call) => call.context.state.requestReason), ["user", "user", "user", "user"]);
+	const nextUser = f.classifications.at(-1).context.state;
+	assert.equal(nextUser.currentPhase, "implementation");
+	assert.equal(nextUser.latestUserMessage, reviewRequest);
+	assert.ok(nextUser.recentMessages.some((message) => message.role === "toolResult" && message.toolName === "read" && !message.isError && message.text.includes(evidence)));
 	const result = session.messages.find((message) => message.role === "toolResult");
 	assert.equal(result.toolName, "read");
 	assert.ok(textOf(result).includes(evidence));
@@ -371,8 +378,11 @@ test("classifier receives bounded recent text, not full history, tool arguments,
 	const path = join(f.cwd, "private-tool-argument.txt");
 	const toolText = `TOOL-BEGIN ${"tool-evidence ".repeat(900)} TOOL-END`;
 	writeFileSync(path, toolText);
-	await f.prompt(session, longPrompt, [decision("planning"), decision("implementation")],
-		{ model: "interactive", read: path, thinking: "HIDDEN-REASONING-SENTINEL" }, chat("implementation"));
+	await f.prompt(session, longPrompt, [decision("planning")],
+		{ model: "interactive", read: path, thinking: "HIDDEN-REASONING-SENTINEL" }, chat("interactive"));
+	assert.equal(f.classifications.length, 1, "Tool output is not classified until the next user request");
+	assert.ok(textOf(f.calls.at(-1).messages.findLast((message) => message.role === "toolResult")).includes(toolText));
+	await f.prompt(session, longPrompt, [decision("implementation")], chat("implementation"));
 	for (const { context } of f.classifications) {
 		assert.ok(context.state.recentMessages.length <= 8);
 		assert.ok(context.state.latestUserMessage.length <= 6100);
@@ -558,8 +568,9 @@ test("legacy config is read-only fallback; old custom pins and phase signals can
 	const path = join(f.cwd, "legacy-signal-fixture.txt");
 	writeFileSync(path, "Continue implementing the approved cache.");
 	for (const prefix of ["workflow", "model-switcher"]) session.sessionManager.appendCustomEntry(`${prefix}.override`, { mode: "auto" });
-	await f.prompt(session, "Inspect the fixture, then continue implementation.", [decision("planning"), decision("implementation")], {
-		model: "interactive", read: path,
+	const classifierCount = f.classifications.length;
+	await f.prompt(session, "Inspect the fixture, then continue implementation.", [decision("implementation")], {
+		model: "implementation", read: path,
 		beforeResponse: () => {
 			// A same-turn signal would have overridden classification in the old
 			// extension. Seed it through Pi's real session manager, not a router mock.
@@ -567,7 +578,8 @@ test("legacy config is read-only fallback; old custom pins and phase signals can
 			for (const prefix of ["workflow", "model-switcher"]) session.sessionManager.appendCustomEntry(`${prefix}.phase`, { phase: "review", userId });
 		},
 	}, chat("implementation"));
-	assert.equal(f.classifications.at(-1).context.state.requestReason, "continuation");
+	assert.equal(f.classifications.length, classifierCount + 1, "Legacy signals do not trigger continuation classification");
+	assert.equal(f.classifications.at(-1).context.state.requestReason, "user");
 	assert.equal(routerStates(session).at(-1).data.state.phase, "implementation", "Even fresh same-turn legacy signals are ignored");
 	assert.equal(existsSync(join(f.agentDir, "model-switcher.json")), false, "Reading workflow.json never migrates or rewrites it");
 	// An existing new file takes precedence over the legacy filename.

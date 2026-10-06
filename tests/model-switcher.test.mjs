@@ -76,9 +76,9 @@ test("registration only adds a virtual model and is inert until selected", (t) =
 
 test("classifier decisions alone route planning -> implementation -> review and retain the thinking level", async (t) => {
 	const h = setup(t);
-	for (const [phase, model, reason] of [["planning", primary, "user"], ["implementation", secondary, "user"], ["review", primary, "continuation"]]) {
+	for (const [phase, model] of [["planning", primary], ["implementation", secondary], ["review", primary]]) {
 		h.answer(choice(phase));
-		const result = await h.route({ reason, thinkingLevel: "medium" });
+		const result = await h.route({ thinkingLevel: "medium" });
 		assert.equal(result.model, model);
 		assert.equal(result.state.phase, phase);
 		assert.equal(result.thinkingLevel, "medium");
@@ -130,17 +130,46 @@ test("classifier warnings are bounded and headless routing does not access UI", 
 	assert.equal((await h.route()).model, primary);
 });
 
-test("file edits and successful tools are evidence, not a separate phase trigger", async (t) => {
+test("file edits and successful tools reach the next user classification, not a separate phase trigger", async (t) => {
 	const h = setup(t);
 	const messages = [user("Design it first; wait for approval")];
 	for (const [toolName, text] of [["write", "Wrote pseudocode stubs in src/cache.ts"], ["bash", "Committed and opened a draft PR"]]) {
 		messages.push({ role: "toolResult", toolName, content: [{ type: "text", text }], isError: false });
-		const result = await h.route({ reason: "continuation", messages });
+		const result = await h.route({ messages: [...messages, user("Revise the design; do not implement yet")] });
 		assert.equal(result.model, primary);
 		assert.equal(result.state.phase, "planning");
-		assert.equal(h.calls.at(-1).context.state.recentMessages.at(-1).text, text);
+		assert.equal(h.calls.at(-1).context.state.recentMessages.at(-2).text, text);
 	}
 	assert.equal(h.calls.length, 2);
+});
+
+test("tool continuations keep the dispatched model and thinking level without config reads or classification", async (t) => {
+	const h = setup(t, { noConfig: true });
+	const state = { phase: "planning" };
+	// Deliberately disagree with the saved phase: the dispatched model wins.
+	for (const reason of ["continuation", "retry"]) {
+		const result = await h.route({ reason, state, previous: { model: secondary, thinkingLevel: "low" } });
+		assert.equal(result.model, secondary);
+		assert.equal(result.thinkingLevel, "low");
+		assert.equal(result.state, state);
+	}
+	const noState = await h.route({ reason: "continuation", state: undefined, previous: { model: primary } });
+	assert.equal(noState.model, primary);
+	assert.equal(noState.thinkingLevel, "high");
+	assert.equal(noState.state, undefined);
+	assert.equal(h.calls.length, 0);
+	assert.equal(h.notices.length, 0);
+});
+
+test("continuations without a previous response use the saved phase or interactive default without classifying", async (t) => {
+	const h = setup(t);
+	h.answer(choice("review"));
+	for (const [state, model] of [[undefined, primary], [{ phase: "implementation" }, secondary], [{ phase: "unknown" }, primary]]) {
+		const result = await h.route({ reason: "continuation", state });
+		assert.equal(result.model, model);
+	}
+	assert.equal(h.calls.length, 0);
+	assert.equal(h.notices.length, 0);
 });
 
 test("direct calls and retries do not classify or change phase", async (t) => {
@@ -150,7 +179,7 @@ test("direct calls and retries do not classify or change phase", async (t) => {
 	assert.equal(direct.model, secondary);
 	assert.equal(direct.state, undefined);
 	assert.equal((await h.route({ reason: "direct", state: undefined })).model, primary);
-	const retry = await h.route({ reason: "retry", state, failed: { model: primary, thinkingLevel: "low" } });
+	const retry = await h.route({ reason: "retry", state, failed: { model: primary, thinkingLevel: "low" }, previous: { model: secondary, thinkingLevel: "medium" } });
 	assert.equal(retry.model, primary);
 	assert.equal(retry.thinkingLevel, "low");
 	assert.equal(retry.state, state);
@@ -172,11 +201,39 @@ test("an aborted request is not converted into fallback work", async (t) => {
 	assert.equal(h.notices.length, 0, "cancellation is not a provider warning");
 });
 
-test("classification gets a timeout signal and failure falls back to interactive initially", async (t) => {
+test("the 1.5-second classifier deadline retains phase, including when a provider returns a late decision", async (t) => {
 	const h = setup(t);
-	h.answer({ stopReason: "aborted", answers: {} });
-	assert.equal((await h.route()).model, primary);
-	assert.ok(h.calls[0].opts.signal instanceof AbortSignal);
+	let deadline;
+	const timeouts = [];
+	t.mock.method(AbortSignal, "timeout", (ms) => {
+		timeouts.push(ms);
+		deadline = new AbortController();
+		return deadline.signal;
+	});
+	for (const [state, model] of [[undefined, primary], [{ phase: "implementation" }, secondary]]) {
+		for (const lateDecision of [false, true]) {
+			const started = Promise.withResolvers();
+			h.answer(async ({ signal }) => {
+				const aborted = new Promise((resolve) => signal.addEventListener("abort", resolve, { once: true }));
+				started.resolve(signal);
+				await aborted;
+				return lateDecision ? choice("review") : { stopReason: "aborted", answers: {} };
+			});
+			const parent = new AbortController();
+			const pending = h.route({ state, signal: parent.signal });
+			const signal = await started.promise;
+			assert.equal(signal.aborted, false);
+			deadline.abort(new DOMException("Classifier deadline exceeded", "TimeoutError"));
+			const result = await pending;
+			assert.equal(signal.aborted, true);
+			assert.equal(parent.signal.aborted, false, "Local timeout does not cancel the user's request");
+			assert.equal(result.model, model);
+			if (state) assert.equal(result.state, state);
+			else assert.deepEqual(result.state, { phase: "planning" });
+		}
+	}
+	assert.deepEqual(timeouts, [1500, 1500, 1500, 1500]);
+	assert.equal(h.notices.length, 1);
 });
 
 test("classifier projection is bounded, strips private blocks, and never mutates model context", () => {

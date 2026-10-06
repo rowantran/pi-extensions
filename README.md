@@ -49,8 +49,8 @@ It owns the work instructions and works with any selected model. It does not
 activate or control the model switcher.
 
 The optional `model-switcher.ts` extension uses Jev to choose a model before
-each ordinary request. It adds no agent tools, commands, work instructions, or
-handoff messages. Its classifier prompt goes only to the classifier. Pi keeps
+each new user message. Tool follow-ups keep the dispatched model. It adds no
+agent tools, commands, work instructions, or handoff messages. Its classifier prompt goes only to the classifier. Pi keeps
 the conversation and routing state; there is no separate worker session.
 
 ### Agree on a committed skeleton
@@ -117,10 +117,12 @@ skill without the switcher, and the switcher without the skill.
 
 ### How routing works
 
-Jev classifies the next response as planning, implementation, or review.
+Jev classifies each new user message as planning, implementation, or review.
 Planning and review use the interactive model; implementation uses the other
 model. A valid decision needs at least 80% probability to change the phase.
-File writes do not independently switch models: they can be planning edits.
+Tool follow-ups keep the dispatched model and thinking level without another
+classifier call. File writes do not independently switch models: they can be
+planning edits. Tool output can inform classification on the next user message.
 
 Jev receives the current phase, the latest user message, and bounded text from
 up to eight recent messages. This **can include private conversation text, code,
@@ -130,8 +132,9 @@ the normal conversation.
 
 An uncertain decision keeps the current phase. An unavailable, disabled
 (`"classifier": null`), or failed classifier also keeps the current phase and
-warns once per session when a UI is available. Classification has a five-second
-timeout. Without a saved phase, routing starts on the interactive model.
+warns once per session when a UI is available. Classification has a 1.5-second
+timeout; a timeout keeps the current phase and does not cancel the user request.
+Without a saved phase, routing starts on the interactive model.
 **There is no explicit phase-tool fallback anymore.** If classification cannot
 run, choose a model manually through `/model`.
 
@@ -141,10 +144,11 @@ user still applies regardless of the selected model.
 
 The router returns its phase as Pi's native virtual-model state. Pi preserves
 it across resume, branches, and compaction. No extension-specific signal or pin
-journal is read or written. Retries reuse the failed model; direct requests,
-including compaction, keep the previous physical model and do not classify.
-Normal Pi compaction can still occur if a selected model has a smaller context
-window.
+journal is read or written. Tool follow-ups reuse the previous model; retries
+reuse the failed model (or the previous one when no failed response exists).
+Direct requests, including compaction, keep the previous physical model and do
+not classify. Normal Pi compaction can still occur if a selected model has a
+smaller context window.
 
 This uses the same `registerVirtualModel` and `request.state` mechanism as
 [Pi's virtual-model example](https://pi.dev/docs/latest/virtual-models), with
