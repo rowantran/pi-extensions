@@ -12,6 +12,20 @@ const MODEL_STATUS_KEYS = ["isara-fast"];
 // Shown before the model when a virtual model (such as model-switcher/auto)
 // picks the physical model for each request.
 const VIRTUAL_MODEL_BADGE = "\uF074"; // Nerd Fonts nf-fa-shuffle
+// Shown before the host name when Pi runs in a pi-remote session.
+const REMOTE_BADGE = "\uEB3A"; // Nerd Fonts nf-cod-remote
+
+/**
+ * The remote host name when Pi runs in a pi-remote session. pi-remote sets
+ * these variables in the remote Pi process and in its local client, which
+ * runs this footer as a presentation adapter.
+ */
+export function remoteHost(env: NodeJS.ProcessEnv = process.env): string | undefined {
+	if (env.PI_REMOTE_SESSION !== "1") {
+		return undefined;
+	}
+	return sanitizeStatus(env.PI_REMOTE_SESSION_HOST ?? "") || undefined;
+}
 
 type FooterModel = { model: ExtensionContext["model"]; thinkingLevel: string | undefined; virtual: boolean };
 
@@ -185,10 +199,12 @@ export default function codexFooter(pi: ExtensionAPI): void {
 					const modelStatuses = MODEL_STATUS_KEYS.map((key) => sanitizeStatus(extensionStatuses.get(key) ?? ""))
 						.filter(Boolean)
 						.map((text) => lightRed(theme, text));
+					const host = remoteHost();
 					const mainSegments = [
 						badge + theme.fg("warning", `${providerPrefix}${modelName}${thinking}${contextMax}`),
 						...modelStatuses,
 						contextSegment(theme, contextUsage),
+						...(host ? [theme.fg("accent", `${REMOTE_BADGE} ${host}`)] : []),
 						theme.fg("success", workspace),
 					];
 
