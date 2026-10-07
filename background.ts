@@ -34,6 +34,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { stripTerminalSequences, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { withCompactToolRendering } from "./compact-tools.ts";
+import { renderBackgroundMessage } from "./background/render.ts";
 import {
 	AGENT_FORGET_ENTRY,
 	AGENT_REFERENCE_ENTRY,
@@ -60,7 +61,6 @@ const MAX_WIDGET_ITEMS = 5;
 const WIDGET_TICK_MS = 1_000;
 const WIDGET_ID = "background-running";
 const KILL_ESCALATION_MS = 5_000;
-const NOTICE_RENDER_MAX_OUTPUT_LINES = 5;
 
 const TERMINAL_STATES = new Set<ActivityState>(["completed", "failed", "stopped", "timed_out"]);
 
@@ -1057,20 +1057,7 @@ export default function background(pi: ExtensionAPI): void {
 		},
 	});
 
-	pi.registerMessageRenderer("background", (message, _options, theme) => {
-		const content = typeof message.content === "string" ? message.content : "";
-		const [first = "", ...output] = content.split("\n");
-		const visibleOutput = output.slice(0, NOTICE_RENDER_MAX_OUTPUT_LINES);
-		const hiddenLines = output.length - visibleOutput.length;
-		const lines = [
-			`  ${theme.fg("accent", "● ")}${theme.fg("muted", first)}`,
-			...visibleOutput.map((line) => `    ${theme.fg("dim", line || " ")}`),
-		];
-		if (hiddenLines > 0) {
-			lines.push(`    ${theme.fg("dim", `(+ ${hiddenLines} ${hiddenLines === 1 ? "line" : "lines"})`)}`);
-		}
-		return new Text(lines.join("\n"), 0, 0);
-	});
+	pi.registerMessageRenderer("background", renderBackgroundMessage);
 
 	pi.registerCommand("background", {
 		description: "List retained background shell commands and agents",

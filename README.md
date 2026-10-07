@@ -174,6 +174,19 @@ agents inherit the parent's model and thinking level and use normal Pi discovery
 for providers, extensions, skills, and prompt templates, subject to Pi's usual
 settings and project trust rules. No provider-specific path is required.
 
+### Message rendering
+
+Background notices show the first line, up to five more content lines, and a
+count of hidden lines. The full message remains available to the model.
+
+Other transcript clients can import `renderBackgroundMessage` from
+`background/render.ts` and register it for the `background` custom-message type.
+It has Pi's `MessageRenderer` signature: `(message, options, theme) => Component | undefined`
+(the implementation always returns a `Text` component). This display-only module
+imports no worker, process, session, or credential code and does not register any
+tools or start activities. Import it instead of `background.ts` when only
+rendering remote or saved messages.
+
 ### Storage and recovery
 
 Each child saves its session under `<child cwd>/.pi/subagents/`. These files stay
