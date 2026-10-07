@@ -7,7 +7,7 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 const { compactCodemodeTool, parseNestedArgs, scriptTitle, CODEMODE_TITLE_GUIDELINE } = await import(
 	"../codemode/render.ts"
 );
-const { compactRenderingState } = await import("../compact-tools.ts");
+const { callHeading, compactRenderingState, renderRows } = await import("../compact-tools.ts");
 initTheme("dark");
 
 const theme = {
@@ -244,4 +244,67 @@ test("untitled scripts show the bare label", () => {
 	const view = createView({ args: { code: "return 1;" } });
 	view.result({ content: [header("completed")], details: { calls: [] } });
 	assert.deepEqual(view.lines(), ["  ┌─ Codemode", "  └─ Completed · 1.4s"]);
+});
+
+test("one codemode component caches layout but keeps nested statuses, durations, results, and expansion live", () => {
+	for (const width of [0, 1, 5, 12, 24, 80]) {
+		const tool = compactCodemodeTool({ name: "codemode", parameters: {} });
+		const context = { expanded: false, isPartial: true, isError: false, state: {}, invalidate() {} };
+		const args = { code: "// live 👩🏽‍💻 界 e\u0301\nreturn 1;" };
+		const call = tool.renderCall(args, theme, context);
+		let nested = undefined, outcome = "Running…", hidden = 0, output = [];
+		const frame = () => {
+			const rows = [{ prefix: "┌─ ", continuation: "│  ", content: "Codemode(live 👩🏽‍💻 界 e\u0301)", truncate: !context.expanded }];
+			if (nested) {
+				rows.push({
+					prefix: "│  └─ ", continuation: "│     ",
+					content: `${callHeading(theme, "bash", { command: "echo 界" })} ── ${nested}`,
+					truncate: !context.expanded,
+				});
+				if (context.expanded && nested === "boom") rows.push({ prefix: "│     ", continuation: "│     ", content: "second error line" });
+			}
+			if (context.expanded) {
+				rows.push({ prefix: output.length ? "│  " : "└─ ", continuation: output.length ? "│  " : "   ", content: outcome });
+				output.forEach((content, index) => {
+					const last = index === output.length - 1;
+					rows.push({ prefix: last ? "└─ " : "│  ", continuation: last ? "   " : "│  ", content });
+				});
+			} else {
+				rows.push({ prefix: "└─ ", continuation: "   ", content: outcome, truncate: true });
+				if (hidden) rows.push({ prefix: "   ", content: `(+ ${hidden} line)`, truncate: true });
+			}
+			const lines = call.render(width);
+			assert.deepEqual(lines, renderRows(rows, width));
+			assert.strictEqual(call.render(width), lines, "codemode uses the shared layout cache");
+			return lines;
+		};
+		const result = (callStatus, extra = {}, isPartial = true) => {
+			context.isPartial = isPartial;
+			tool.renderResult({
+				content: isPartial ? [] : [header("completed"), { type: "text", text: "first output\nsecond output" }],
+				details: { calls: [{ id: "1", name: "bash", args: JSON.stringify({ command: "echo 界" }), status: callStatus, ...extra }] },
+			}, { expanded: context.expanded, isPartial }, theme, context);
+		};
+		frame();
+		nested = "Running…"; result("running"); frame();
+		nested = "40ms"; result("ok", { durationMs: 40 }); frame();
+		nested = "1.2s · $0.02"; result("ok", { durationMs: 1200, cost: 0.02 }); frame();
+		nested = "boom"; result("error", { error: "boom\nsecond error line" }); frame();
+		outcome = "first output · 1 failed · 1.4s"; hidden = 1;
+		result("error", { error: "boom\nsecond error line" }, false); frame();
+		// A settled call still follows later state/result changes without replacing its component.
+		nested = "2.0s"; outcome = "first output · 1.4s";
+		result("ok", { durationMs: 2000 }, false); frame();
+		context.state.summary = outcome = "Live timer: 3s";
+		const before = frame();
+		context.state.summary = outcome = "Live timer: 4s";
+		assert.notStrictEqual(frame(), before);
+		context.expanded = true; output = ["second output"];
+		const collapsed = before;
+		call.invalidate();
+		assert.notStrictEqual(frame(), collapsed);
+		const expanded = frame();
+		call.invalidate();
+		assert.notStrictEqual(frame(), expanded, "invalidation discards even unchanged expanded layout");
+	}
 });

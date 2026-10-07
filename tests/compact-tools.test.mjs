@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { initTheme } from "@earendil-works/pi-coding-agent";
 
-const { default: compactTools, compactRenderingState } = await import("../compact-tools.ts");
+const { getThemeByName } = await import(new URL(
+	"./modes/interactive/theme/theme.js", import.meta.resolve("@earendil-works/pi-coding-agent"),
+));
+
+const { default: compactTools, branch, callHeading, compactRenderingState, hiddenLinesRow, renderRows } = await import("../compact-tools.ts");
 initTheme("dark");
 
 const theme = { fg: (_color, text) => text, bold: (text) => text };
@@ -89,5 +93,52 @@ test("alt+o view keeps the count under the outcome", () => {
 		]);
 	} finally {
 		state.showFullToolCall = false;
+	}
+});
+
+test("collapsed direct calls reuse layout while keeping result state live", () => {
+	const tool = tools.get("bash");
+	const args = { command: "echo 👩🏽‍💻 界 e\u0301 and a long heading" };
+	for (const themeName of ["dark", "light"]) {
+		const activeTheme = getThemeByName(themeName);
+		for (const width of [0, 1, 5, 12, 24, 80]) {
+			const context = { args, expanded: false, isPartial: true, isError: false, state: {}, invalidate() {} };
+			const call = tool.renderCall(args, activeTheme, context);
+			const expected = () => renderRows([
+				{
+					prefix: branch(activeTheme, "┌─ ", context.state.status),
+					continuation: activeTheme.fg("dim", "│  "),
+					content: callHeading(activeTheme, "bash", args),
+					truncate: true,
+				},
+				{ prefix: activeTheme.fg("dim", "└─ "), continuation: "   ", content: context.state.summary, truncate: true },
+				...(context.state.hiddenLines ? [hiddenLinesRow(activeTheme, context.state.hiddenLines)] : []),
+			], width);
+			const frame = () => {
+				const lines = call.render(width);
+				assert.deepEqual(lines, expected());
+				assert.strictEqual(call.render(width), lines, "direct call uses the shared layout cache");
+				return lines;
+			};
+			frame();
+			for (const [text, isPartial, isError] of [
+				["", true, false],
+				["finished 界\nsecond line\nthird line", false, false],
+				["updated settled result", false, false],
+				["boom\ndetails", false, true],
+			]) {
+				context.isPartial = isPartial;
+				context.isError = isError;
+				tool.renderResult({ content: [{ type: "text", text }], details: {} }, { expanded: false, isPartial }, activeTheme, context);
+				frame();
+			}
+			context.state.summary = activeTheme.fg("toolOutput", "Live elapsed time: 3s");
+			const before = frame();
+			context.state.summary = activeTheme.fg("toolOutput", "Live elapsed time: 4s");
+			assert.notStrictEqual(frame(), before, "same-width state changes do not freeze output");
+			const cached = frame();
+			call.invalidate();
+			assert.notStrictEqual(frame(), cached, "theme/expansion invalidation clears cached layout");
+		}
 	}
 });

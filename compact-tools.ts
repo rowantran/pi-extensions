@@ -374,11 +374,53 @@ function block(rows: DisplayRow[]): Component {
 	};
 }
 
-/** Rows computed at render time, so they follow state that the result renderer updates later. */
-function lazyRows(getRows: () => DisplayRow[]): Component {
+interface ResolvedDisplayRow {
+	prefix: string;
+	continuation: string;
+	content: string;
+	truncate: boolean;
+}
+
+/** Rebuild and resolve live rows every render; reuse layout only when all values and the width match. */
+export function lazyRows(
+	getRows: () => DisplayRow[],
+	layout: typeof renderRows = renderRows,
+): Component {
+	let cachedWidth: number | undefined;
+	let cachedRows: ResolvedDisplayRow[] | undefined;
+	let cachedLines: string[] | undefined;
+
 	return {
-		render: (width: number) => renderRows(getRows(), width),
-		invalidate(): void {},
+		render(width: number): string[] {
+			// Resolve every function once, including on hits. Pass only strings to layout on misses so
+			// statuses, timers, and values with side effects are not evaluated a second time.
+			const rows = getRows().map((row): ResolvedDisplayRow => {
+				const prefix = displayValue(row.prefix);
+				const content = displayValue(row.content);
+				const continuation = displayValue(row.continuation ?? " ".repeat(visibleWidth(prefix)));
+				return { prefix, content, continuation, truncate: !!row.truncate };
+			});
+			if (
+				cachedWidth === width && cachedLines && cachedRows &&
+				rows.length === cachedRows.length &&
+				rows.every((row, index) => {
+					const previous = cachedRows![index]!;
+					return row.prefix === previous.prefix && row.content === previous.content &&
+						row.continuation === previous.continuation && row.truncate === previous.truncate;
+				})
+			) return cachedLines;
+
+			const lines = layout(rows, width);
+			cachedWidth = width;
+			cachedRows = rows;
+			cachedLines = lines;
+			return lines;
+		},
+		invalidate(): void {
+			cachedWidth = undefined;
+			cachedRows = undefined;
+			cachedLines = undefined;
+		},
 	};
 }
 

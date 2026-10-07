@@ -16,7 +16,7 @@ import {
 	type DisplayRow,
 	firstOutputLine,
 	hiddenLinesRow,
-	renderRows,
+	lazyRows,
 	toolHeading,
 } from "../compact-tools.ts";
 
@@ -261,10 +261,7 @@ function renderCodemodeCall(args: { code?: unknown }, theme: Theme, context: Cal
 		return result;
 	};
 
-	return {
-		render: (width: number) => renderRows(rows(), width),
-		invalidate(): void {},
-	};
+	return lazyRows(rows);
 }
 
 /** Split Pi's codemode result into the wall time and the script output that follows its header. */
