@@ -240,8 +240,8 @@ durability guarantee.
 lists show what each session is about: `/resume`, the footer, and `pi-remote ls`
 for remote slots. It sends recent user and assistant text from the active branch
 (no thinking, tool calls, or tool output) to a model and sets the reply as a
-kebab-case slug, for example `fix-login-redirect-loop`, with Pi's own session
-name.
+normal title of at most 80 characters, for example `Fix the login redirect loop`,
+with Pi's own session name.
 
 - A name set with `/name` or `--name` is never replaced. If you set one while a
   request is in progress, the request is cancelled.

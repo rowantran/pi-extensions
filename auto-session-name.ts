@@ -4,7 +4,7 @@ import type { Api, Model } from "@earendil-works/pi-ai";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext, type SessionEntry } from "@earendil-works/pi-coding-agent";
 
 /**
- * Names an unnamed session with a short slug after a run settles, so session
+ * Names an unnamed session with a short title after a run settles, so session
  * lists (including pi-remote ls) show what each session is about. It uses Pi's
  * own session name, so /name always wins and /resume shows the result.
  */
@@ -12,13 +12,13 @@ import { getAgentDir, type ExtensionAPI, type ExtensionContext, type SessionEntr
 export const configPath = () => join(getAgentDir(), "auto-session-name.json");
 const MAX_MESSAGES = 6;
 const MAX_MESSAGE_CHARS = 1500;
-const MAX_SLUG_CHARS = 48;
+const MAX_TITLE_CHARS = 80;
 
 export const INSTRUCTIONS = [
 	"You name coding-agent sessions so a user can tell them apart in a list.",
-	"Reply with ONE kebab-case slug of 2 to 6 words that says what the user is working on,",
-	'for example "fix-login-redirect-loop" or "add-csv-export".',
-	"Use lowercase ASCII letters, digits, and hyphens only. Reply with the slug only.",
+	"Reply with ONE short, descriptive title of at most 80 characters that says what the user is working on,",
+	'for example "Fix the login redirect loop" or "Add CSV export".',
+	"Use normal words and spaces, in the conversation's language. Reply with the title only, without quotes, markdown, or explanation.",
 ].join(" ");
 
 /** `{"model": "provider/id"}` pins the naming model; `{"enabled": false}` turns naming off. */
@@ -60,12 +60,12 @@ export function excerpt(branch: SessionEntry[]): string | undefined {
 	return selected.map((m) => `${m.role === "user" ? "User" : "Assistant"}: ${m.text}`).join("\n\n");
 }
 
-/** Model output is untrusted. Keep a bounded ASCII slug from its first non-empty line. */
-export function slugify(text: string): string | undefined {
+/** Keep one display-safe line, preserving case, punctuation, and non-ASCII text. */
+export function normalizeTitle(text: string): string | undefined {
 	const line = text.split("\n").map((value) => value.trim()).find(Boolean) ?? "";
-	let slug = line.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
-	if (slug.length > MAX_SLUG_CHARS) slug = slug.slice(0, MAX_SLUG_CHARS).replace(/-[^-]*$/, "");
-	return slug || undefined;
+	const title = line.replace(/[\x00-\x1f\x7f-\x9f]/g, " ").replace(/\s+/g, " ")
+		.replace(/^["'`“‘]+|["'`”’]+$/g, "").trim();
+	return Array.from(title).slice(0, MAX_TITLE_CHARS).join("").trim() || undefined;
 }
 
 /** The configured model, or the physical model that wrote the latest reply (this
@@ -106,7 +106,7 @@ export default function autoSessionName(pi: ExtensionAPI) {
 				messages: [{ role: "user", content: [{ type: "text", text: conversation }], timestamp: Date.now() }],
 			}, { signal: controller.signal, cacheRetention: "none" });
 			if (response.stopReason === "error" || response.stopReason === "aborted") throw new Error(response.errorMessage ?? `Naming request ${response.stopReason}`);
-			const name = slugify(textOf(response.content));
+			const name = normalizeTitle(textOf(response.content));
 			// A /name, session switch, or shutdown during the request wins.
 			if (!name || controller.signal.aborted || pi.getSessionName() || ctx.sessionManager.getSessionId() !== sessionId) return;
 			pi.setSessionName(name);

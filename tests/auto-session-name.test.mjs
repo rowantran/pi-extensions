@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import autoSessionName, { INSTRUCTIONS, configPath, excerpt, readConfig, slugify } from "../auto-session-name.ts";
+import autoSessionName, { INSTRUCTIONS, configPath, excerpt, readConfig, normalizeTitle } from "../auto-session-name.ts";
 
 const haiku = { provider: "isara", id: "claude-haiku", api: "anthropic-messages" };
 const opus = { provider: "isara", id: "claude-opus", api: "anthropic-messages" };
@@ -45,10 +45,10 @@ function setup(t, { config, branch = [user("Please fix the login redirect loop")
 	return { state, calls, notices, settle: () => handlers.get("agent_settled")({ type: "agent_settled" }, ctx), emit: (event, value) => handlers.get(event)(value, ctx) };
 }
 
-test("names an unnamed session with a slug from the model of the latest reply", async (t) => {
+test("names an unnamed session with a title from the model of the latest reply", async (t) => {
 	const { state, calls, notices, settle } = setup(t);
 	await settle();
-	assert.equal(state.name, "fix-login-redirect-loop");
+	assert.equal(state.name, "Fix Login Redirect Loop");
 	assert.equal(calls.length, 1);
 	assert.equal(calls[0].model, opus);
 	assert.equal(calls[0].context.systemPrompt, INSTRUCTIONS);
@@ -76,7 +76,7 @@ test("waits until the branch has both user and assistant text", async (t) => {
 	assert.equal(calls.length, 0);
 	state.branch = [user("only a question"), reply("an answer")];
 	await settle();
-	assert.equal(state.name, "fix-login-redirect-loop");
+	assert.equal(state.name, "Fix Login Redirect Loop");
 });
 
 test("a manual name or session switch during the request wins", async (t) => {
@@ -111,7 +111,7 @@ test("failures warn once and later runs retry", async (t) => {
 	assert.match(notices[0].text, /^Automatic session naming failed/);
 	fail = false;
 	await settle();
-	assert.equal(state.name, "add-csv-export");
+	assert.equal(state.name, "Add CSV export");
 });
 
 test("a virtual latest-reply model or bad config is reported, not sent", async (t) => {
@@ -145,8 +145,18 @@ test("excerpt keeps visible text, the first request, and recent messages", () =>
 	assert.ok(excerpt([user("x".repeat(5000)), reply("y")]).length < 1600);
 });
 
-test("slugify keeps a bounded ASCII slug", () => {
-	assert.equal(slugify('\n "Fix Login Redirect!" \nignored'), "fix-login-redirect");
-	assert.equal(slugify("!!!"), undefined);
-	assert.equal(slugify("alpha-beta-gamma-delta-epsilon-zeta-eta-theta-iota-kappa"), "alpha-beta-gamma-delta-epsilon-zeta-eta-theta");
+test("normalizeTitle preserves normal titles and removes surrounding quotes and extra whitespace", () => {
+	assert.equal(normalizeTitle('\n "Fix Login Redirect!" \nignored'), "Fix Login Redirect!");
+	assert.equal(normalizeTitle("‘Fix café login: OAuth + redirects’"), "Fix café login: OAuth + redirects");
+	assert.equal(normalizeTitle("Repair\t  CSV\u0000 export"), "Repair CSV export");
+	assert.equal(normalizeTitle("改善登录流程"), "改善登录流程");
+	assert.equal(normalizeTitle("\n  \n"), undefined);
+	assert.equal(normalizeTitle('""'), undefined);
+});
+
+test("normalizeTitle caps titles at 80 characters without splitting Unicode characters", () => {
+	assert.equal(normalizeTitle("x".repeat(80)), "x".repeat(80));
+	assert.equal(normalizeTitle("x".repeat(100)), "x".repeat(80));
+	assert.equal(normalizeTitle("x".repeat(79) + " 🐛 more text"), "x".repeat(79));
+	assert.equal(normalizeTitle("🐛".repeat(81)), "🐛".repeat(80));
 });
