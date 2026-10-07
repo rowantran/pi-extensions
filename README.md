@@ -234,6 +234,30 @@ not have complete records. Check files or external systems before repeating a
 side effect. Session persistence is not an exactly-once execution or power-loss
 durability guarantee.
 
+## Automatic session names
+
+`auto-session-name.ts` names an unnamed session after a run settles, so session
+lists show what each session is about: `/resume`, the footer, and `pi-remote ls`
+for remote slots. It sends recent user and assistant text from the active branch
+(no thinking, tool calls, or tool output) to a model and sets the reply as a
+kebab-case slug, for example `fix-login-redirect-loop`, with Pi's own session
+name.
+
+- A name set with `/name` or `--name` is never replaced. If you set one while a
+  request is in progress, the request is cancelled.
+- After a session has a name, the extension does nothing more.
+- A failure shows one warning per Pi process. The next settled run tries again.
+
+By default the request goes to the physical model that wrote the latest reply.
+That can be expensive, so pin a cheap model in `~/.pi/agent/auto-session-name.json`
+(or under `PI_CODING_AGENT_DIR`):
+
+```json
+{ "model": "isara/claude-haiku-4-5-20251001" }
+```
+
+Add `"enabled": false` to turn naming off. The file is read on each attempt.
+
 ## Slack bot
 
 `slack_bot_send_message` and `slack_bot_list_channels` call the Slack Web API
@@ -256,7 +280,9 @@ cover assistant backgrounds across session switches, repeated lifecycle events,
 and non-TUI sessions. Background-agent tests use offline fixture providers and
 real RPC child processes to check discovery, persistence, parent restart/death,
 child crashes, torn JSONL tails, writer exclusion, idle cleanup, and recovery.
-They do not make external model requests. Model-switcher tests cover phase
+They do not make external model requests. Auto-session-name tests cover naming,
+model selection, manual-name races, and failures with a fake model registry.
+Model-switcher tests cover phase
 routing, classifier failure/uncertainty, native model selection, context
 preservation, and the real Pi runtime with offline fixture providers. The lockfile pins development
 peers to the tested Pi version; Pi supplies its own host modules when loading the
