@@ -61,6 +61,14 @@ const MAX_WIDGET_ITEMS = 5;
 const WIDGET_TICK_MS = 1_000;
 const WIDGET_ID = "background-running";
 const KILL_ESCALATION_MS = 5_000;
+const MAX_INSTRUCTION_CHARS = 16_384;
+const MAX_ARGUMENT_BYTES = 128 * 1_024;
+
+function checkInstructionLength(text: string | undefined): void {
+	if (text && text.length > MAX_INSTRUCTION_CHARS) {
+		throw new Error(`Background instructions are limited to ${MAX_INSTRUCTION_CHARS} characters. Put longer material in a file and send its path with a short instruction.`);
+	}
+}
 
 const TERMINAL_STATES = new Set<ActivityState>(["completed", "failed", "stopped", "timed_out"]);
 
@@ -237,7 +245,10 @@ const StartParameters = Type.Object({
 		description: "Activity kind: shell runs a command; agent delegates an autonomous task",
 	}),
 	command: Type.Optional(Type.String({ description: "Shell command (required for kind=shell)" })),
-	task: Type.Optional(Type.String({ description: "Delegated task (required for kind=agent)" })),
+	task: Type.Optional(Type.String({
+		maxLength: MAX_INSTRUCTION_CHARS,
+		description: `Delegated task (required for kind=agent), at most ${MAX_INSTRUCTION_CHARS} characters. Put longer material in a file and reference its path.`,
+	})),
 	name: Type.Optional(Type.String({ description: "Short human-readable label" })),
 	cwd: Type.Optional(Type.String({ description: "Working directory; defaults to the session cwd" })),
 	timeoutSeconds: Type.Optional(Type.Number({ description: "Kill a shell command after this many seconds" })),
@@ -263,7 +274,10 @@ const OutputParameters = Type.Object({
 
 const SendParameters = Type.Object({
 	id: Type.String({ description: "Background agent ID or saved subagent session file, including after a parent restart" }),
-	message: Type.String({ description: "Instruction to steer a running agent or resume its saved conversation" }),
+	message: Type.String({
+		maxLength: MAX_INSTRUCTION_CHARS,
+		description: `Instruction to steer a running agent or resume its saved conversation, at most ${MAX_INSTRUCTION_CHARS} characters. Put longer material in a file and reference its path.`,
+	}),
 });
 
 export default function background(pi: ExtensionAPI): void {
@@ -275,6 +289,42 @@ export default function background(pi: ExtensionAPI): void {
 	let ui: ExtensionContext["ui"] | undefined;
 	let widgetTimer: NodeJS.Timeout | undefined;
 	let shuttingDown = false;
+
+	// OpenAI Responses exposes argument fragments before Pi repeatedly parses
+	// their growing prefix. Count only bytes, without retaining or parsing text.
+	const argumentStreams = new Map<number, { name: string; bytes: number }>();
+	let streamAborted = false;
+	pi.on("provider_stream_event", (event, ctx) => {
+		if (event.api !== "openai-responses") return;
+		const data = event.data as {
+			type: string; output_index: number; delta?: string; arguments?: string;
+			item?: { type: string; name: string; arguments?: string };
+		};
+		if (data.type === "response.created") {
+			argumentStreams.clear();
+			streamAborted = false;
+		}
+		if (streamAborted) return;
+		if (data.type === "response.output_item.added" && data.item?.type === "function_call"
+			&& (data.item.name === "background_start" || data.item.name === "background_send")) {
+			argumentStreams.set(data.output_index, { name: data.item.name, bytes: Buffer.byteLength(data.item.arguments ?? "", "utf8") });
+		}
+		const call = argumentStreams.get(data.output_index);
+		if (!call) return;
+		if (data.type === "response.function_call_arguments.delta") {
+			call.bytes += Buffer.byteLength(data.delta ?? "", "utf8");
+		} else if (data.type === "response.function_call_arguments.done") {
+			call.bytes = Buffer.byteLength(data.arguments ?? "", "utf8");
+		} else if (data.type === "response.output_item.done") {
+			call.bytes = Math.max(call.bytes, Buffer.byteLength(data.item?.arguments ?? "", "utf8"));
+			argumentStreams.delete(data.output_index);
+		}
+		if (call.bytes > MAX_ARGUMENT_BYTES) {
+			streamAborted = true;
+			ctx.abort();
+			ctx.ui.notify(`${call.name} arguments exceeded 128 KiB. Cancelled the current turn; the instruction was not sent. Put longer material in a file and send its path.`, "warning");
+		}
+	});
 
 	function ensureLogDir(): string {
 		logDir ??= mkdtempSync(join(tmpdir(), "pi-bg-"));
@@ -763,6 +813,7 @@ export default function background(pi: ExtensionAPI): void {
 		],
 		parameters: StartParameters,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			checkInstructionLength(params.task);
 			ui ??= ctx.ui;
 			const cwd = resolve(ctx.cwd, params.cwd ?? ".");
 			if (!statSync(cwd).isDirectory()) throw new Error(`Not a directory: ${cwd}`);
@@ -953,6 +1004,7 @@ export default function background(pi: ExtensionAPI): void {
 		description: "Steer a running background agent or resume its saved conversation, including after runtime cleanup, a crash, or a parent restart. Accepts an agent ID or saved session file.",
 		parameters: SendParameters,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			checkInstructionLength(params.message);
 			const activity = requireActivity(params.id, ctx);
 			if (activity.kind !== "agent") throw new Error(`${activity.id} is a shell activity and cannot receive messages.`);
 			const message = params.message.trim();
