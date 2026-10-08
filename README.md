@@ -236,17 +236,41 @@ durability guarantee.
 
 ## Automatic session names
 
-`auto-session-name.ts` names an unnamed session after a run settles, so session
-lists show what each session is about: `/resume`, the footer, and `pi-remote ls`
-for remote slots. It sends recent user and assistant text from the active branch
-(no thinking, tool calls, or tool output) to a model and sets the reply as a
-normal title of at most 80 characters, for example `Fix the login redirect loop`,
-with Pi's own session name.
+`auto-session-name.ts` names an unnamed session after a run settles, then updates
+the title as the conversation grows. Pi's own session name appears in `/resume`,
+the footer, and `pi-remote ls` for remote slots. Titles use normal words and
+spaces, preserve Unicode, and contain at most 80 characters, for example
+`Fix the login redirect loop`.
 
-- A name set with `/name` or `--name` is never replaced. If you set one while a
-  request is in progress, the request is cancelled.
-- After a session has a name, the extension does nothing more.
-- A failure shows one warning per Pi process. The next settled run tries again.
+- After the first title, updates run at user turns 4, 8, 16, 32, and so on—not on
+  every turn. Tool follow-ups do not count as user turns. Missed checkpoints are
+  combined into one request, not replayed.
+- Each compaction also triggers an update using its summary. Automatic
+  compaction waits for retries and queued work to settle. A compaction and a
+  turn checkpoint in the same run produce one request.
+- Requests use bounded, visible user and assistant text from the active branch
+  (no thinking, tool calls, or tool output). The first title includes the opening
+  request; later titles use recent messages. Compaction updates combine the
+  summary with retained and newer messages, including recovery replies. Later
+  turn checkpoints use recent messages after that compaction, not its summary.
+  Empty summaries and the placeholder from `pi-openai-server-compaction` fall
+  back to the recent message excerpt.
+- Each request generates a title from that context. The prompt does not include
+  the current title or ask the model to preserve it. Replies longer than 12
+  words are rejected instead of storing part of an answer as the title.
+- `/name` stops automatic updates permanently for that session and cancels an
+  in-progress request. This also applies if you choose the same title or clear
+  it. Existing names without a saved automatic-ownership record, including
+  names set before this version, are left alone.
+- Ownership and the next checkpoint are saved in the session file, outside
+  model context, so they survive restarts. Session changes, tree navigation,
+  and shutdown discard in-progress results. Navigating back to an older branch
+  does not repeat its compaction check.
+- Requests run in the background. They do not delay new prompts, idle
+  notifications, or compaction completion.
+- A failure keeps the current title and shows at most one warning per Pi
+  process. Unnamed sessions retry after the next settled run. Failed updates
+  wait for the next checkpoint or compaction instead of retrying every turn.
 
 By default the request goes to the physical model that wrote the latest reply.
 That can be expensive, so pin a cheap model in `~/.pi/agent/auto-session-name.json`
@@ -281,7 +305,10 @@ and non-TUI sessions. Background-agent tests use offline fixture providers and
 real RPC child processes to check discovery, persistence, parent restart/death,
 child crashes, torn JSONL tails, writer exclusion, idle cleanup, and recovery.
 They do not make external model requests. Auto-session-name tests cover naming,
-model selection, manual-name races, and failures with a fake model registry.
+model selection, the doubling schedule, compaction, durable ownership,
+manual-name races, cancellation, and failures with a fake model registry. Offline
+Pi runtime tests also check title updates, compaction, resume, manual ownership,
+and non-blocking requests without network calls.
 Model-switcher tests cover phase
 routing, classifier failure/uncertainty, native model selection, context
 preservation, and the real Pi runtime with offline fixture providers. The lockfile pins development
