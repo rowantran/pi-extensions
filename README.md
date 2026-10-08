@@ -174,6 +174,19 @@ agents inherit the parent's model and thinking level and use normal Pi discovery
 for providers, extensions, skills, and prompt templates, subject to Pi's usual
 settings and project trust rules. No provider-specific path is required.
 
+### Instruction limits
+
+`background_start.task` and `background_send.message` accept at most 16,384
+characters. Put larger reports, code, and logs in files, then send their paths
+with a short instruction. Oversized instructions are rejected, not truncated.
+
+For OpenAI Responses streams, the extension also cancels the current parent
+turn when either tool call's JSON arguments exceed 128 KiB. This includes
+`background_start` shell calls. The larger limit allows for JSON escaping and
+other fields. The guard counts fragments before Pi parses their growing prefix;
+it does not retain their text or affect other tools. Existing background agents
+keep running. Other APIs receive the schema and execution limits only.
+
 ### Message rendering
 
 Background notices show the first line, up to five more content lines, and a

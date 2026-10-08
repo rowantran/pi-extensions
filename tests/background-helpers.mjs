@@ -35,6 +35,7 @@ export function harness(t, f, model = { provider: "discovery-provider", id: "dis
 	const waiting = [];
 	const ctx = {
 		cwd: f.cwd, model, thinkingLevel: "high", sessionManager: parent,
+		abort() {},
 		ui: { setStatus() {}, setWidget() {}, notify() {} },
 	};
 	background({
@@ -52,7 +53,8 @@ export function harness(t, f, model = { provider: "discovery-provider", id: "dis
 	});
 	let closed = false;
 	const h = {
-		parent, ctx,
+		parent, ctx, tools,
+		emit(type, data = {}) { return handlers.get(type)?.({ type, ...data }, ctx); },
 		async open() { await handlers.get("session_start")({}, ctx); },
 		call(name, params) { return tools.get(name).execute("test-call", params, undefined, undefined, ctx); },
 		nextNotice() {

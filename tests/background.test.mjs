@@ -51,6 +51,41 @@ for (const provider of ["isara", "openai", "custom-provider"]) {
 	});
 }
 
+test("instruction limits are advertised and reject oversized tasks before creating a child", async (t) => {
+	const f = fixture(t);
+	const clients = mockClients(t);
+	const h = harness(t, f);
+	for (const [tool, field] of [["background_start", "task"], ["background_send", "message"]]) {
+		const schema = h.tools.get(tool).parameters.properties[field];
+		assert.equal(schema.maxLength, 16_384);
+		assert.match(schema.description, /16384 characters.*file/);
+	}
+	await assert.rejects(h.call("background_start", { kind: "agent", task: "x".repeat(16_384) + " " }), /limited to 16384 characters/);
+	await assert.rejects(h.call("background_send", { id: "unknown", message: "x".repeat(16_385) }), /limited to 16384 characters/);
+	assert.equal(clients.length, 0);
+	assert.equal(existsSync(join(f.cwd, ".pi", "subagents")), false);
+	assert.equal(h.parent.getBranch().some(e => e.customType === AGENT_REFERENCE_ENTRY), false);
+});
+
+test("exact-limit instructions work; oversized sends neither steer nor resume a child", async (t) => {
+	const f = fixture(t);
+	const clients = mockClients(t);
+	const h = harness(t, f);
+	const text = "x".repeat(16_384);
+	const started = await h.call("background_start", { kind: "agent", task: text });
+	assert.equal(readSavedAgent(started.details.sessionFile).task, text);
+	await h.call("background_send", { id: started.details.id, message: text });
+	assert.equal(RpcClient.prototype.steer.mock.calls[0].arguments[0], text);
+	const before = readFileSync(started.details.sessionFile, "utf8");
+	await assert.rejects(h.call("background_send", { id: started.details.id, message: text + " " }), /limited to 16384 characters/);
+	assert.equal(RpcClient.prototype.steer.mock.callCount(), 1);
+	await h.call("background_stop", { id: started.details.id });
+	await assert.rejects(h.call("background_send", { id: started.details.sessionFile, message: text + "x" }), /limited to 16384 characters/);
+	assert.equal(clients.length, 1);
+	assert.equal(RpcClient.prototype.prompt.mock.callCount(), 1);
+	assert.equal(readFileSync(started.details.sessionFile, "utf8"), before);
+});
+
 test("startup failures keep the durable session and reference for recovery", async (t) => {
 	const f = fixture(t);
 	mockClients(t);
