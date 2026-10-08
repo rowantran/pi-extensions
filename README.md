@@ -200,6 +200,25 @@ imports no worker, process, session, or credential code and does not register an
 tools or start activities. Import it instead of `background.ts` when only
 rendering remote or saved messages.
 
+### Active-task widget
+
+The native TUI shows a bordered widget below the editor with elapsed time and
+names for up to five running shells or agents, plus a count of additional tasks.
+RPC sends the same data as plain `setWidget` string-array lines under the key
+`background-running`, with `belowEditor` placement. Clients that support widgets
+can show these lines directly; RPC does not support native component factories.
+The widget updates once per second while tasks run and clears when the last task
+finishes or stops, or when the session shuts down. JSON and print modes do not
+start widget timers.
+
+Terminal clients can import `BACKGROUND_WIDGET_ID` and
+`renderBackgroundWidgetLines(lines, width, theme)` from `background/widget.ts` to
+render RPC lines with the native borders and colors. `backgroundWidgetLines`
+builds the plain payload from active `{ kind, name, startedAt }` objects. This
+shared module loads no worker code and starts no processes or timers. The
+renderer removes terminal controls, bounds output to the supplied terminal
+width, and keeps unrecognized content as plain text.
+
 ### Storage and recovery
 
 Each child saves its session under `<child cwd>/.pi/subagents/`. These files stay

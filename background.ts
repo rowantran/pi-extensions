@@ -31,10 +31,11 @@ import {
 	type JsonAgentSessionEvent,
 } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
-import { stripTerminalSequences, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { stripTerminalSequences, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { withCompactToolRendering } from "./compact-tools.ts";
 import { renderBackgroundMessage } from "./background/render.ts";
+import { BACKGROUND_WIDGET_ID, backgroundWidgetLines, renderBackgroundWidgetLines } from "./background/widget.ts";
 import {
 	AGENT_FORGET_ENTRY,
 	AGENT_REFERENCE_ENTRY,
@@ -57,9 +58,7 @@ const OUTPUT_DEFAULT_LINES = 100;
 const OUTPUT_MAX_LINES = 2_000;
 const STATUS_TEXT_LIMIT = 2_000;
 const MAX_ACTIVITY_ITEMS = 12;
-const MAX_WIDGET_ITEMS = 5;
 const WIDGET_TICK_MS = 1_000;
-const WIDGET_ID = "background-running";
 const KILL_ESCALATION_MS = 5_000;
 const MAX_INSTRUCTION_CHARS = 16_384;
 const MAX_ARGUMENT_BYTES = 128 * 1_024;
@@ -136,36 +135,6 @@ function elapsed(from: number, to = Date.now()): string {
 
 function age(timestamp: number): string {
 	return `${elapsed(timestamp)} ago`;
-}
-
-// Bordered widget design adapted from hazat/pi-interactive-subagents.
-// Copyright (c) 2026 HazAT; used under the repository's MIT License.
-function borderLine(content: string, width: number, accent: (text: string) => string): string {
-	if (width <= 0) return "";
-	if (width === 1) return accent("│");
-
-	const contentWidth = width - 2;
-	const truncated = truncateToWidth(content, contentWidth);
-	const padding = " ".repeat(Math.max(0, contentWidth - visibleWidth(truncated)));
-	return `${accent("│")}${truncated}${padding}${accent("│")}`;
-}
-
-function borderTop(title: string, info: string, width: number, accent: (text: string) => string): string {
-	if (width <= 0) return "";
-	if (width === 1) return accent("╭");
-
-	const innerWidth = width - 2;
-	const titlePart = `─ ${title} `;
-	const infoPart = ` ${info} ─`;
-	const fill = "─".repeat(Math.max(0, innerWidth - visibleWidth(titlePart) - visibleWidth(infoPart)));
-	const inner = truncateToWidth(`${titlePart}${fill}${infoPart}`, innerWidth, "");
-	return accent(`╭${inner}${"─".repeat(Math.max(0, innerWidth - visibleWidth(inner)))}╮`);
-}
-
-function borderBottom(width: number, accent: (text: string) => string): string {
-	if (width <= 0) return "";
-	if (width === 1) return accent("╰");
-	return accent(`╰${"─".repeat(width - 2)}╯`);
 }
 
 function deriveName(value: string): string {
@@ -287,6 +256,7 @@ export default function background(pi: ExtensionAPI): void {
 	let nextShellId = 1;
 	let logDir: string | undefined;
 	let ui: ExtensionContext["ui"] | undefined;
+	let mode: ExtensionContext["mode"] | undefined;
 	let widgetTimer: NodeJS.Timeout | undefined;
 	let shuttingDown = false;
 
@@ -337,43 +307,41 @@ export default function background(pi: ExtensionAPI): void {
 		);
 	}
 
+	function captureUI(ctx: ExtensionContext): void {
+		ui = ctx.ui;
+		mode = ctx.mode;
+	}
+
+	function clearWidgetTimer(): void {
+		if (widgetTimer) clearInterval(widgetTimer);
+		widgetTimer = undefined;
+	}
+
 	function updateWidget(): void {
-		if (!ui) return;
+		if (shuttingDown || !ui || (mode !== "tui" && mode !== "rpc")) {
+			clearWidgetTimer();
+			return;
+		}
 		const active = running();
 		ui.setStatus("background", undefined);
 		if (active.length === 0) {
-			ui.setWidget(WIDGET_ID, undefined);
-			if (widgetTimer) {
-				clearInterval(widgetTimer);
-				widgetTimer = undefined;
-			}
+			ui.setWidget(BACKGROUND_WIDGET_ID, undefined, { placement: "belowEditor" });
+			clearWidgetTimer();
 			return;
 		}
 
-		ui.setWidget(
-			WIDGET_ID,
-			(_tui, theme) => ({
-				invalidate() {},
-				render(width: number): string[] {
-					const visible = active.slice(0, MAX_WIDGET_ITEMS);
-					const overflow = active.length - visible.length;
-					const accent = (text: string) => theme.fg("accent", text);
-					const lines = [borderTop("Background", `${active.length} running`, width, accent)];
-
-					for (const activity of visible) {
-						const duration = theme.fg("dim", `(${elapsed(activity.startedAt)})`);
-						const label = theme.fg("muted", activity.kind === "agent" ? "Agent:" : "Task:");
-						lines.push(borderLine(` ${duration} ${label} ${activity.name} `, width, accent));
-					}
-					if (overflow > 0) {
-						lines.push(borderLine(` ${theme.fg("dim", `(+ ${overflow} more)`)} `, width, accent));
-					}
-					lines.push(borderBottom(width, accent));
-					return lines;
-				},
-			}),
-			{ placement: "belowEditor" },
-		);
+		if (mode === "rpc") {
+			ui.setWidget(BACKGROUND_WIDGET_ID, backgroundWidgetLines(active), { placement: "belowEditor" });
+		} else {
+			ui.setWidget(
+				BACKGROUND_WIDGET_ID,
+				(_tui, theme) => ({
+					invalidate() {},
+					render: (width: number) => renderBackgroundWidgetLines(backgroundWidgetLines(active), width, theme),
+				}),
+				{ placement: "belowEditor" },
+			);
+		}
 		if (!widgetTimer) {
 			widgetTimer = setInterval(updateWidget, WIDGET_TICK_MS);
 			widgetTimer.unref();
@@ -814,7 +782,7 @@ export default function background(pi: ExtensionAPI): void {
 		parameters: StartParameters,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			checkInstructionLength(params.task);
-			ui ??= ctx.ui;
+			if (!ui) captureUI(ctx);
 			const cwd = resolve(ctx.cwd, params.cwd ?? ".");
 			if (!statSync(cwd).isDirectory()) throw new Error(`Not a directory: ${cwd}`);
 
@@ -1114,13 +1082,13 @@ export default function background(pi: ExtensionAPI): void {
 	pi.registerCommand("background", {
 		description: "List retained background shell commands and agents",
 		handler: async (_args, ctx) => {
-			ui ??= ctx.ui;
+			if (!ui) captureUI(ctx);
 			ctx.ui.notify(await listStatus(undefined, ctx), "info");
 		},
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
-		ui = ctx.ui;
+		captureUI(ctx);
 		shuttingDown = false;
 		agentReferences.clear();
 		for (const entry of ctx.sessionManager.getBranch()) {
@@ -1142,12 +1110,11 @@ export default function background(pi: ExtensionAPI): void {
 
 	pi.on("session_shutdown", async () => {
 		shuttingDown = true;
-		if (widgetTimer) {
-			clearInterval(widgetTimer);
-			widgetTimer = undefined;
+		clearWidgetTimer();
+		if (mode === "tui" || mode === "rpc") {
+			ui?.setStatus("background", undefined);
+			ui?.setWidget(BACKGROUND_WIDGET_ID, undefined, { placement: "belowEditor" });
 		}
-		ui?.setStatus("background", undefined);
-		ui?.setWidget(WIDGET_ID, undefined);
 
 		const stops: Promise<void>[] = [];
 		for (const activity of activities.values()) {
