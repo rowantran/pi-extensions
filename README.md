@@ -167,6 +167,19 @@ Existing `workflow.json` settings remain readable when `model-switcher.json`
 is absent. If both exist, the new file wins. The extension does not rewrite
 either file or change your default model.
 
+## Going AFK skill
+
+Before you leave the keyboard, invoke:
+
+```text
+/skill:going-afk Describe the goal to finish while you are away
+```
+
+The agent first restates the goal, requests every permission it expects to
+need, and asks its questions in one message, with a default for each. After
+you answer, it works without stopping for input and ends with a report of what
+it did, the decisions it made, and what is still blocked.
+
 ## Background agents
 
 Background agents run Pi in RPC mode with a separate, saved conversation. New
