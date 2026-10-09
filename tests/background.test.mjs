@@ -306,7 +306,10 @@ test("forget only untracks an agent; its file can be resumed explicitly", { time
 	await h.close();
 	const restarted = harness(t, f);
 	await restarted.open();
-	assert.equal((await restarted.call("background_status", {})).content[0].text, "No background activities.");
+	const status = await restarted.call("background_status", {});
+	assert.match(status.content[0].text, /^No background activities\.\nBackground usage \(saved, separate from parent\): 1 agent/);
+	assert.equal(status.details.count, 0);
+	assert.equal(status.details.backgroundUsage.agents, 1, "Untracking does not erase saved spend");
 	await restarted.call("background_send", { id: started.details.sessionFile, message: "Recover the saved conversation." });
 	assert.ok((await restarted.nextNotice()).content.includes("forgotten-token"));
 });

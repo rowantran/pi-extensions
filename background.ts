@@ -35,6 +35,7 @@ import { stripTerminalSequences, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { withCompactToolRendering } from "./compact-tools.ts";
 import { renderBackgroundMessage } from "./background/render.ts";
+import { agentSessionFiles, BackgroundUsageReader, backgroundUsageText, type AgentUsage, type BackgroundUsage } from "./background/usage.ts";
 import { BACKGROUND_WIDGET_ID, backgroundWidgetLines, renderBackgroundWidgetLines } from "./background/widget.ts";
 import {
 	AGENT_FORGET_ENTRY,
@@ -59,6 +60,7 @@ const OUTPUT_MAX_LINES = 2_000;
 const STATUS_TEXT_LIMIT = 2_000;
 const MAX_ACTIVITY_ITEMS = 12;
 const WIDGET_TICK_MS = 1_000;
+const USAGE_TICK_MS = 5_000;
 const KILL_ESCALATION_MS = 5_000;
 const MAX_INSTRUCTION_CHARS = 16_384;
 const MAX_ARGUMENT_BYTES = 128 * 1_024;
@@ -98,11 +100,6 @@ interface ShellActivity extends BaseActivity {
 	checkinTimer?: NodeJS.Timeout;
 	timeoutTimer?: NodeJS.Timeout;
 	killTimer?: NodeJS.Timeout;
-}
-
-interface AgentUsage {
-	tokens: number;
-	cost: number;
 }
 
 interface AgentActivity extends BaseActivity {
@@ -258,6 +255,14 @@ export default function background(pi: ExtensionAPI): void {
 	let ui: ExtensionContext["ui"] | undefined;
 	let mode: ExtensionContext["mode"] | undefined;
 	let widgetTimer: NodeJS.Timeout | undefined;
+	let usageTimer: NodeJS.Timeout | undefined;
+	let usageFiles = new Set<string>();
+	let parentSessionFile: string | undefined;
+	let usageReader = new BackgroundUsageReader();
+	let usageRefresh: Promise<BackgroundUsage> | undefined;
+	let usageGeneration = 0;
+	let lastUsageStatus: string | undefined;
+	let usageStatusInitialized = false;
 	let shuttingDown = false;
 
 	// OpenAI Responses exposes argument fragments before Pi repeatedly parses
@@ -308,8 +313,53 @@ export default function background(pi: ExtensionAPI): void {
 	}
 
 	function captureUI(ctx: ExtensionContext): void {
+		clearUsageTimer();
 		ui = ctx.ui;
 		mode = ctx.mode;
+		parentSessionFile = ctx.sessionManager.getSessionFile();
+		usageFiles = agentSessionFiles(ctx.sessionManager.getEntries());
+		usageReader = new BackgroundUsageReader();
+		usageRefresh = undefined;
+		usageGeneration++;
+		usageStatusInitialized = false;
+	}
+
+	function clearUsageTimer(): void {
+		if (usageTimer) clearInterval(usageTimer);
+		usageTimer = undefined;
+	}
+
+	function refreshUsage(fresh = false): Promise<BackgroundUsage> {
+		if (usageRefresh) return fresh ? usageRefresh.then(() => refreshUsage(true)) : usageRefresh;
+		const generation = usageGeneration;
+		const refresh = usageReader.read(usageFiles, parentSessionFile).then((usage) => {
+			if (generation !== usageGeneration || shuttingDown) return usage;
+			if (ui && (mode === "tui" || mode === "rpc")) {
+				try {
+					const status = usage.agents ? `bg ${backgroundUsageText(usage)}` : undefined;
+					if (!usageStatusInitialized || status !== lastUsageStatus) {
+						ui.setStatus("background", status);
+						lastUsageStatus = status;
+						usageStatusInitialized = true;
+					}
+					// Keep watching saved histories even when local runtimes are idle:
+					// a recovered child (or a nested child) may still be writing them.
+					if (usageFiles.size && !usageTimer) {
+						usageTimer = setInterval(() => void refreshUsage(), USAGE_TICK_MS);
+						usageTimer.unref();
+					}
+				} catch {
+					// UI contexts can expire on replacement/reload. Accounting and
+					// completion delivery must not fail with the display update.
+					clearUsageTimer();
+				}
+			}
+			return usage;
+		}).finally(() => {
+			if (usageRefresh === refresh) usageRefresh = undefined;
+		});
+		usageRefresh = refresh;
+		return refresh;
 	}
 
 	function clearWidgetTimer(): void {
@@ -323,7 +373,6 @@ export default function background(pi: ExtensionAPI): void {
 			return;
 		}
 		const active = running();
-		ui.setStatus("background", undefined);
 		if (active.length === 0) {
 			ui.setWidget(BACKGROUND_WIDGET_ID, undefined, { placement: "belowEditor" });
 			clearWidgetTimer();
@@ -349,6 +398,8 @@ export default function background(pi: ExtensionAPI): void {
 	}
 
 	function rememberAgent(activity: AgentActivity): void {
+		usageFiles.add(activity.sessionFile);
+		void refreshUsage();
 		if (agentReferences.get(activity.id) === activity.sessionFile) return;
 		agentReferences.set(activity.id, activity.sessionFile);
 		pi.appendEntry(AGENT_REFERENCE_ENTRY, {
@@ -598,13 +649,14 @@ export default function background(pi: ExtensionAPI): void {
 		activity.endedAt = activity.updatedAt = Date.now();
 		scheduleAgentReap(activity);
 		pruneFinished();
+		void refreshUsage(true);
 
 		if (shuttingDown) return;
 		const rawResult = activity.lastText || activity.error || "The agent produced no final text.";
 		const result = truncateHead(rawResult, { maxBytes: NOTICE_AGENT_BYTES, maxLines: OUTPUT_MAX_LINES });
 		const suffix = result.truncated ? "\n[Result truncated in this notice; use background_output for the retained result.]" : "";
 		const usage = activity.usage
-			? `\nUsage: ${activity.usage.tokens.toLocaleString()} tokens, $${activity.usage.cost.toFixed(4)}`
+			? `\nSession usage (cumulative): ${activity.usage.tokens.toLocaleString()} tokens, $${activity.usage.cost.toFixed(4)}`
 			: "";
 		pi.sendMessage(
 			{
@@ -745,7 +797,6 @@ export default function background(pi: ExtensionAPI): void {
 			lines.push(`Task: ${activity.task}`, `Session ID: ${activity.sessionId}`, `Session file: ${activity.sessionFile}`);
 			if (activity.activity.length > 0) lines.push("Recent activity:", ...activity.activity.map((item) => `- ${item}`));
 			if (activity.lastText) lines.push("Latest assistant text:", shorten(activity.lastText, STATUS_TEXT_LIMIT));
-			if (activity.usage) lines.push(`Usage: ${activity.usage.tokens.toLocaleString()} tokens, $${activity.usage.cost.toFixed(4)}`);
 			if (activity.state !== "running") {
 				lines.push(
 					activity.client
@@ -757,14 +808,21 @@ export default function background(pi: ExtensionAPI): void {
 		return lines.join("\n");
 	}
 
-	async function listStatus(id?: string, ctx?: ExtensionContext): Promise<string> {
+	async function listStatus(id?: string, ctx?: ExtensionContext): Promise<{ text: string; usage: BackgroundUsage }> {
 		if (id) {
 			const activity = requireActivity(id, ctx);
-			if (activity.kind === "agent") await refreshAgent(activity);
-			return detailedStatus(activity);
+			let text = detailedStatus(activity);
+			if (activity.kind === "agent") {
+				await refreshAgent(activity);
+				const savedUsage = await usageReader.read([activity.sessionFile], parentSessionFile);
+				text = `${detailedStatus(activity)}\nSaved usage (including nested agents): ${backgroundUsageText(savedUsage)}`;
+			}
+			return { text, usage: await refreshUsage(true) };
 		}
 		await Promise.all([...activities.values()].filter((a): a is AgentActivity => a.kind === "agent").map(refreshAgent));
-		return activities.size === 0 ? "No background activities." : [...activities.values()].map(activityLine).join("\n");
+		const usage = await refreshUsage(true);
+		const listing = activities.size === 0 ? "No background activities." : [...activities.values()].map(activityLine).join("\n");
+		return { text: usage.agents ? `${listing}\nBackground usage (saved, separate from parent): ${backgroundUsageText(usage)}` : listing, usage };
 	}
 
 	pi.registerTool({
@@ -913,11 +971,13 @@ export default function background(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "background_status",
 		label: "Background Status",
-		description: "Inspect one retained background activity or list all activities. Do not poll this tool merely to wait; completions arrive automatically.",
+		description: "Inspect one retained background activity or list all activities with saved background token/cost totals, separate from the parent session. Do not poll this tool merely to wait; completions arrive automatically.",
 		parameters: StatusParameters,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const text = await listStatus(params.id, ctx);
-			return { content: [{ type: "text", text }], details: { id: params.id, count: activities.size } };
+			if (!ui) captureUI(ctx);
+			const { text, usage } = await listStatus(params.id, ctx);
+			return { content: [{ type: "text", text }], details: { id: params.id, count: activities.size,
+				backgroundUsage: usage } };
 		},
 		renderCall(args, theme) {
 			return new Text(
@@ -1033,6 +1093,7 @@ export default function background(pi: ExtensionAPI): void {
 				addAgentActivity(activity, "agent run stopped");
 				scheduleAgentReap(activity);
 				pruneFinished();
+				await refreshUsage(true);
 			}
 			return {
 				content: [{ type: "text", text: `Stopped ${activity.id}; retained output remains available.` }],
@@ -1083,7 +1144,7 @@ export default function background(pi: ExtensionAPI): void {
 		description: "List retained background shell commands and agents",
 		handler: async (_args, ctx) => {
 			if (!ui) captureUI(ctx);
-			ctx.ui.notify(await listStatus(undefined, ctx), "info");
+			ctx.ui.notify((await listStatus(undefined, ctx)).text, "info");
 		},
 	});
 
@@ -1106,10 +1167,13 @@ export default function background(pi: ExtensionAPI): void {
 			}
 		}
 		updateWidget();
+		await refreshUsage();
 	});
 
 	pi.on("session_shutdown", async () => {
 		shuttingDown = true;
+		usageGeneration++;
+		clearUsageTimer();
 		clearWidgetTimer();
 		if (mode === "tui" || mode === "rpc") {
 			ui?.setStatus("background", undefined);

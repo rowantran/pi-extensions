@@ -219,6 +219,59 @@ shared module loads no worker code and starts no processes or timers. The
 renderer removes terminal controls, bounds output to the supplied terminal
 width, and keeps unrecognized content as plain text.
 
+### Background usage
+
+The TUI footer and RPC `setStatus` output show a separate background total, for
+example `bg 2 agents · 12,345 tokens · $0.3600`. `background_status` and
+`/background` include the same total; the tool's `details.backgroundUsage`
+contains `{ agents, tokens, cost, unavailable }`. Pi's built-in token and cost
+totals still cover the parent session only. This extension does not copy child
+usage into the parent transcript or change Pi's accounting.
+
+The total reads saved child session files, including nested children, forgotten
+or pruned activities, pre-compaction history, and alternate branches within each
+file. Explicit saved references identify children; generic `parentSession`
+headers are not followed. Repeated references and symlink aliases count once.
+Resuming a child adds its new saved usage without adding old usage again.
+Completion notices label the child's own session usage as cumulative, not as a
+per-run amount.
+
+Usage refreshes on startup, completion, stop, and status requests. In TUI and RPC
+modes it also refreshes every five seconds while saved references exist, even
+when no local activity is running. Unchanged files use cached totals. JSON and
+print modes expose totals through the status tool without starting a UI timer.
+Missing, invalid, or unreadable files mark the total as incomplete instead of
+claiming zero cost. Reading never repairs or rewrites a live child's history.
+Only saved usage is observable: tokens spent in an interrupted stream that was
+never persisted cannot be recovered from these files.
+
+Costs come from each saved `usage.cost.total`, not from the currently selected
+model's rates. Virtual routers record responses from physical models; provider
+adjustments for fast/priority processing, discounts, long-context tiers, and
+cache pricing must already be in that saved value. The background reader does
+not apply another multiplier or reprice historical responses. Reasoning and
+one-hour cache-write tokens are subsets of output and cache-write tokens; they
+are not added again to the token total.
+
+These are Pi/provider cost estimates, not a provider billing reconciliation.
+Missing catalog rates can already be recorded as zero. Router classifiers,
+automatic naming, image generation, and other extension-owned model calls are
+included only if their owners persist usage in entries Pi counts. Usage that
+was never saved cannot be inferred by this reader; its incomplete marker checks
+unreadable/invalid history, not whether upstream prices or usage are complete.
+
+With `pi-remote`, install/update the extension on the remote host and reload the
+slot. The existing daemon forwards and retains `setStatus` updates, including
+for reconnect; both the default client footer and Rowan's presentation footer
+can display the total. No local background worker or new client adapter is
+needed. The client's `/session` continues to show the parent-only Pi totals.
+
+Forked parents can reference the same children. Importing a child by session
+path includes that child's whole saved history, including work done for another
+parent. These are totals for referenced background sessions, not invoices for
+work done exclusively during the current parent conversation. Session files
+must remain on disk to retain their usage history.
+
 ### Storage and recovery
 
 Each child saves its session under `<child cwd>/.pi/subagents/`. These files stay
