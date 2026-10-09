@@ -146,7 +146,7 @@ function widgetHarness(t, mode) {
 	const statuses = [];
 	const notices = [];
 	const waiters = [];
-	const ctx = { cwd, mode, hasUI: mode === "rpc" || mode === "tui", sessionManager: { getBranch: () => [] }, ui: {
+	const ctx = { cwd, mode, hasUI: mode === "rpc" || mode === "tui", sessionManager: { getBranch: () => [], getEntries: () => [], getSessionFile: () => undefined }, ui: {
 		setWidget(key, value, options) {
 			assert.equal(key, BACKGROUND_WIDGET_ID);
 			assert.deepEqual(options, { placement: "belowEditor" });
@@ -318,12 +318,15 @@ for (const mode of ["rpc", "tui"]) {
 		assert.ok(asLines(widgets.at(-1)).some(line => line.includes("1 running")));
 		await resumed.call("background_stop", { id: agent.details.id });
 		assert.equal(widgets.at(-1), undefined);
-		assert.ok(timers.intervals.every(timer => timer.cleared));
+		assert.ok(timers.intervals.filter(timer => timer.delay !== 5_000).every(timer => timer.cleared));
+		assert.ok(timers.intervals.some(timer => timer.delay === 5_000 && !timer.cleared), "Saved usage remains observable after runtimes stop");
 		await resumed.call("background_send", { id: agent.details.id, message: "Finish review" });
 		const resumedHandler = [...eventHandlers.values()].at(-1);
 		resumedHandler({ type: "agent_settled" });
 		await resumed.nextNotice();
 		assert.equal(widgets.at(-1), undefined);
+		assert.ok(timers.intervals.filter(timer => timer.delay !== 5_000).every(timer => timer.cleared));
+		await resumed.close();
 		assert.ok(timers.intervals.every(timer => timer.cleared));
 	});
 }
