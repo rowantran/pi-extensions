@@ -260,6 +260,18 @@ included only if their owners persist usage in entries Pi counts. Usage that
 was never saved cannot be inferred by this reader; its incomplete marker checks
 unreadable/invalid history, not whether upstream prices or usage are complete.
 
+Validation with Pi 1.0.4 and the current Isara provider found existing producer
+limits: `model-switcher` discards Jev classifier usage; summary retries report
+only the final attempt; failed/aborted cache-warming calls are not saved. Isara's
+fast-mode wrapper prices the requested fast mode even if the upstream response
+reports standard processing. These need fixes in their owners, not another
+multiplier or inferred charge in the background reader.
+
+New/reopened child runtimes read Isara's shared saved `/fast` preference through
+normal provider discovery. Already-running children do not automatically reread
+changes made by the parent; their own `/fast` command or session start reloads
+it. Historical saved response costs remain unchanged either way.
+
 With `pi-remote`, install/update the extension on the remote host and reload the
 slot. The existing daemon forwards and retains `setStatus` updates, including
 for reconnect; both the default client footer and Rowan's presentation footer
