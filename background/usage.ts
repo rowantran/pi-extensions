@@ -110,6 +110,13 @@ export class BackgroundUsageReader {
 	}
 }
 
+/** Compact footer text, using the same dollar precision as Rowan's parent cost segment. */
+export function backgroundStatusText(usage: BackgroundUsage): string | undefined {
+	if (!usage.agents) return undefined;
+	// Unreadable or malformed history makes the saved amount a lower bound.
+	return `subagents: ${usage.unavailable ? "\u2265" : ""}$${usage.cost.toFixed(3)}`;
+}
+
 export function backgroundUsageText(usage: BackgroundUsage): string {
 	const partial = usage.unavailable ? ` (incomplete: ${usage.unavailable} unavailable)` : "";
 	return `${usage.agents} ${usage.agents === 1 ? "agent" : "agents"} · ${usage.tokens.toLocaleString()} tokens · $${usage.cost.toFixed(4)}${partial}`;

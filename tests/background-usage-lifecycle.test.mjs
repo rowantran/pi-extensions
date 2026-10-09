@@ -45,7 +45,7 @@ for (const mode of ["rpc", "tui"]) {
 		addUsage(child);
 		const beforeQueries = readFileSync(f.parentFile, "utf8");
 		await h.open();
-		assert.deepEqual(statuses.at(-1), ["background", "bg 1 agent · 40 tokens · $0.2500"]);
+		assert.deepEqual(statuses.at(-1), ["background", "subagents: $0.250"]);
 		assert.equal(timers.length, 1);
 		assert.equal(timers[0].delay, 5_000);
 		const result = await h.call("background_status", {});
@@ -59,10 +59,10 @@ for (const mode of ["rpc", "tui"]) {
 		// written by another/recovered writer, including aborted responses.
 		addUsage(child, "aborted");
 		const updated = Promise.withResolvers();
-		onStatus = value => { if (value?.includes("80 tokens")) updated.resolve(); };
+		onStatus = value => { if (value === "subagents: $0.500") updated.resolve(); };
 		timers[0].callback();
 		await updated.promise;
-		assert.equal(statuses.at(-1)[1], "bg 1 agent · 80 tokens · $0.5000");
+		assert.equal(statuses.at(-1)[1], "subagents: $0.500");
 		assert.match((await h.call("background_status", { id: child.id })).content[0].text, /Saved usage \(including nested agents\): 1 agent · 80 tokens · \$0\.5000/);
 		await h.call("background_forget", { id: child.id });
 		const forgotten = await h.call("background_status", {});
@@ -76,7 +76,7 @@ for (const mode of ["rpc", "tui"]) {
 		restarted.ctx.mode = mode;
 		restarted.ctx.ui.setStatus = h.ctx.ui.setStatus;
 		await restarted.open();
-		assert.equal(statuses.at(-1)[1], "bg 1 agent · 80 tokens · $0.5000");
+		assert.equal(statuses.at(-1)[1], "subagents: $0.500");
 		assert.match((await restarted.call("background_status", {})).content[0].text, /^No background activities\.\nBackground usage/);
 	});
 }
@@ -123,7 +123,7 @@ test("an expired usage UI does not reject a refresh or prevent status results, a
 	const statuses = [];
 	h.ctx.ui.setStatus = (...args) => statuses.push(args);
 	await h.call("background_status", {});
-	assert.deepEqual(statuses.at(-1), ["background", "bg 1 agent · 40 tokens · $0.2500"]);
+	assert.deepEqual(statuses.at(-1), ["background", "subagents: $0.250"]);
 	assert.equal(timers.length, 1);
 });
 
@@ -145,7 +145,7 @@ test("a session switch resets usage and discards the old session's in-flight sna
 	const status = await h.call("background_status", {});
 	assert.deepEqual(status.details.backgroundUsage, { agents: 0, tokens: 0, cost: 0, unavailable: 0 });
 	assert.deepEqual(statuses.at(-1), ["background", undefined]);
-	assert.ok(!statuses.some(([, text]) => text?.includes("80 tokens")), "An old snapshot must not reach the new UI");
+	assert.ok(!statuses.some(([, text]) => text === "subagents: $0.500"), "An old snapshot must not reach the new UI");
 	assert.ok(timers.every(timer => timer.cleared));
 });
 

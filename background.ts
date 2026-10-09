@@ -35,7 +35,7 @@ import { stripTerminalSequences, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { withCompactToolRendering } from "./compact-tools.ts";
 import { renderBackgroundMessage } from "./background/render.ts";
-import { agentSessionFiles, BackgroundUsageReader, backgroundUsageText, type AgentUsage, type BackgroundUsage } from "./background/usage.ts";
+import { agentSessionFiles, BackgroundUsageReader, backgroundStatusText, backgroundUsageText, type AgentUsage, type BackgroundUsage } from "./background/usage.ts";
 import { BACKGROUND_WIDGET_ID, backgroundWidgetLines, renderBackgroundWidgetLines } from "./background/widget.ts";
 import {
 	AGENT_FORGET_ENTRY,
@@ -336,7 +336,7 @@ export default function background(pi: ExtensionAPI): void {
 			if (generation !== usageGeneration || shuttingDown) return usage;
 			if (ui && (mode === "tui" || mode === "rpc")) {
 				try {
-					const status = usage.agents ? `bg ${backgroundUsageText(usage)}` : undefined;
+					const status = backgroundStatusText(usage);
 					if (!usageStatusInitialized || status !== lastUsageStatus) {
 						ui.setStatus("background", status);
 						lastUsageStatus = status;
