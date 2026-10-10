@@ -3,7 +3,7 @@ import { appendFileSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkS
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { agentSessionFiles, BackgroundUsageReader } from "../background/usage.ts";
+import { agentSessionFiles, BackgroundUsageReader, backgroundStatusText } from "../background/usage.ts";
 import { AGENT_FORGET_ENTRY, AGENT_REFERENCE_ENTRY } from "../background/sessions.ts";
 
 const usage = {
@@ -89,9 +89,13 @@ test("nested children, shared references, symlink aliases, and cycles count each
 	appendFileSync(grandchild, JSON.stringify(reference(second)) + "\n");
 	const alias = join(f.dir, "alias.jsonl");
 	symlinkSync(first, alias);
-	assert.deepEqual(await new BackgroundUsageReader().read([first, second, grandchild, alias, parent], parent), {
+	const reader = new BackgroundUsageReader();
+	assert.deepEqual(await reader.read([first, second, grandchild, alias, parent], parent), {
 		agents: 3, tokens: 108, cost: 0.75, unavailable: 0,
 	});
+	assert.deepEqual(await reader.read([first, alias, parent], parent, { includeNested: false }), {
+		agents: 1, tokens: 36, cost: 0.25, unavailable: 0,
+	}, "Per-agent costs exclude nested sessions even after a recursive cache fill");
 });
 
 test("resumed and live histories refresh without mutating torn tails or counting prior runs again", async t => {
@@ -153,4 +157,11 @@ test("rewritten histories replace cached spend and newly appended references dis
 	const replacement = f.save("replacement", [assistant(), assistant(), assistant()]);
 	renameSync(replacement, child); // Different inode, with no nested reference.
 	assert.deepEqual(await reader.read([child]), { agents: 1, tokens: 108, cost: 0.75, unavailable: 0 });
+});
+
+test("footer status is a compact subagent cost without history markers", () => {
+	assert.equal(backgroundStatusText({ agents: 0, tokens: 0, cost: 0, unavailable: 0 }), undefined);
+	assert.equal(backgroundStatusText({ agents: 2, tokens: 12_345, cost: 0.3604, unavailable: 0 }), "subagents: $0.360");
+	assert.equal(backgroundStatusText({ agents: 1, tokens: 0, cost: 0, unavailable: 0 }), "subagents: $0.000");
+	assert.equal(backgroundStatusText({ agents: 3, tokens: 99, cost: 1.2344, unavailable: 1 }), "subagents: $1.234");
 });

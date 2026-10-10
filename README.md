@@ -221,12 +221,17 @@ width, and keeps unrecognized content as plain text.
 
 ### Background usage
 
-The TUI footer and RPC `setStatus` output show a separate background total, for
-example `bg 2 agents · 12,345 tokens · $0.3600`. `background_status` and
-`/background` include the same total; the tool's `details.backgroundUsage`
-contains `{ agents, tokens, cost, unavailable }`. Pi's built-in token and cost
-totals still cover the parent session only. This extension does not copy child
-usage into the parent transcript or change Pi's accounting.
+The TUI footer and RPC `setStatus` output show a separate background cost, for
+example `subagents: $0.360`. It uses the same three-decimal dollar format as the
+parent cost in `codex-footer.ts`, without extra history markers.
+`background_status` and `/background` show the detailed total with agent count,
+tokens, and unavailable sessions; the tool's `details.backgroundUsage` contains
+`{ agents, tokens, cost, unavailable }`. Each retained agent's listing row also
+shows its own saved session cost, for example `Planner · $0.250`, excluding
+nested agents. The overall total still includes nested and forgotten agents.
+Pi's built-in token and cost totals still cover the parent session only. This
+extension does not copy child usage into the parent transcript or change Pi's
+accounting.
 
 The total reads saved child session files, including nested children, forgotten
 or pruned activities, pre-compaction history, and alternate branches within each

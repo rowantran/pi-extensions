@@ -35,7 +35,7 @@ import { stripTerminalSequences, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { withCompactToolRendering } from "./compact-tools.ts";
 import { renderBackgroundMessage } from "./background/render.ts";
-import { agentSessionFiles, BackgroundUsageReader, backgroundUsageText, type AgentUsage, type BackgroundUsage } from "./background/usage.ts";
+import { agentSessionFiles, BackgroundUsageReader, backgroundStatusText, backgroundUsageText, type AgentUsage, type BackgroundUsage } from "./background/usage.ts";
 import { BACKGROUND_WIDGET_ID, backgroundWidgetLines, renderBackgroundWidgetLines } from "./background/widget.ts";
 import {
 	AGENT_FORGET_ENTRY,
@@ -336,7 +336,7 @@ export default function background(pi: ExtensionAPI): void {
 			if (generation !== usageGeneration || shuttingDown) return usage;
 			if (ui && (mode === "tui" || mode === "rpc")) {
 				try {
-					const status = usage.agents ? `bg ${backgroundUsageText(usage)}` : undefined;
+					const status = backgroundStatusText(usage);
 					if (!usageStatusInitialized || status !== lastUsageStatus) {
 						ui.setStatus("background", status);
 						lastUsageStatus = status;
@@ -821,7 +821,13 @@ export default function background(pi: ExtensionAPI): void {
 		}
 		await Promise.all([...activities.values()].filter((a): a is AgentActivity => a.kind === "agent").map(refreshAgent));
 		const usage = await refreshUsage(true);
-		const listing = activities.size === 0 ? "No background activities." : [...activities.values()].map(activityLine).join("\n");
+		const lines = await Promise.all([...activities.values()].map(async activity => {
+			const line = activityLine(activity);
+			if (activity.kind !== "agent") return line;
+			const ownUsage = await usageReader.read([activity.sessionFile], parentSessionFile, { includeNested: false });
+			return `${line} · $${ownUsage.cost.toFixed(3)}`;
+		}));
+		const listing = lines.length ? lines.join("\n") : "No background activities.";
 		return { text: usage.agents ? `${listing}\nBackground usage (saved, separate from parent): ${backgroundUsageText(usage)}` : listing, usage };
 	}
 

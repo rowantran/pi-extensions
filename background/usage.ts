@@ -68,7 +68,7 @@ interface CachedSession {
 export class BackgroundUsageReader {
 	private cache = new Map<string, CachedSession>();
 
-	async read(paths: Iterable<string>, parentFile?: string): Promise<BackgroundUsage> {
+	async read(paths: Iterable<string>, parentFile?: string, options: { includeNested?: boolean } = {}): Promise<BackgroundUsage> {
 		const totals: BackgroundUsage = { tokens: 0, cost: 0, agents: 0, unavailable: 0 };
 		const visited = new Set<string>();
 		if (parentFile) visited.add(await realpath(parentFile).catch(() => resolve(parentFile)));
@@ -83,7 +83,7 @@ export class BackgroundUsageReader {
 				totals.tokens += snapshot.usage.tokens;
 				totals.cost += snapshot.usage.cost;
 				if (snapshot.incomplete) totals.unavailable++;
-				pending.push(...snapshot.children);
+				if (options.includeNested !== false) pending.push(...snapshot.children);
 			} catch {
 				// Do not claim a missing/unreadable history costs nothing.
 				totals.unavailable++;
@@ -108,6 +108,12 @@ export class BackgroundUsageReader {
 		this.cache.set(path, snapshot);
 		return snapshot;
 	}
+}
+
+/** Compact footer text, using the same dollar precision as Rowan's parent cost segment. */
+export function backgroundStatusText(usage: BackgroundUsage): string | undefined {
+	if (!usage.agents) return undefined;
+	return `subagents: $${usage.cost.toFixed(3)}`;
 }
 
 export function backgroundUsageText(usage: BackgroundUsage): string {
