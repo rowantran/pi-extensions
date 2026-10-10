@@ -223,7 +223,8 @@ width, and keeps unrecognized content as plain text.
 
 The TUI footer and RPC `setStatus` output show a separate background cost, for
 example `subagents: $0.360`. It uses the same three-decimal dollar format as the
-parent cost in `codex-footer.ts`, without extra history markers.
+parent cost in `codex-footer.ts`, without extra history markers. Both costs use
+the theme's dim color.
 `background_status` and `/background` show the detailed total with agent count,
 tokens, and unavailable sessions; the tool's `details.backgroundUsage` contains
 `{ agents, tokens, cost, unavailable }`. Each retained agent's listing row also
@@ -281,7 +282,9 @@ With `pi-remote`, install/update the extension on the remote host and reload the
 slot. The existing daemon forwards and retains `setStatus` updates, including
 for reconnect; both the default client footer and Rowan's presentation footer
 can display the total. No local background worker or new client adapter is
-needed. The client's `/session` continues to show the parent-only Pi totals.
+needed. For matching cost colors, update the local renderer checkout and use
+`/reload-ui`; this does not restart remote Pi. The client's `/session` continues
+to show the parent-only Pi totals.
 
 Forked parents can reference the same children. Importing a child by session
 path includes that child's whole saved history, including work done for another

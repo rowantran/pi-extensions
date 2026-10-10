@@ -15,8 +15,8 @@ const response = (model, stopReason = "stop", thinkingLevel = "high") => ({
 });
 const selectAuto = { type: "model_change", provider: auto.provider, modelId: auto.id };
 
-/** Render the first footer line for a selected model and session branch. */
-function mainLine(selected, branch) {
+/** Render the footer for a selected model, session branch, theme, and statuses. */
+function footerLines(selected, branch, renderTheme = theme, statuses = new Map()) {
 	let handler;
 	codexFooter({ on: (_event, fn) => { handler = fn; } });
 	let factory;
@@ -34,9 +34,13 @@ function mainLine(selected, branch) {
 		onBranchChange: () => () => {},
 		getAvailableProviderCount: () => 2,
 		getGitBranch: () => null,
-		getExtensionStatuses: () => new Map(),
+		getExtensionStatuses: () => statuses,
 	};
-	const line = factory({ requestRender() {} }, theme, footerData).render(200)[0];
+	return factory({ requestRender() {} }, renderTheme, footerData).render(200);
+}
+
+function mainLine(selected, branch) {
+	const line = footerLines(selected, branch)[0];
 	return line.replace(/\x1b\[[0-9;]*m/g, "").trim().split(" · ");
 }
 const modelSegment = (selected, branch) => mainLine(selected, branch)[0];
@@ -85,4 +89,23 @@ test("a virtual model shows itself until it has routed a response", () => {
 
 test("a physical model shows no badge", () => {
 	assert.equal(modelSegment(opus, [response(astra)]), "(isara) claude-opus-5-5 high (200k ctx)");
+});
+
+const coloredTheme = { ...theme, fg: (color, text) => `${color === "dim" ? "\x1b[90m" : "\x1b[32m"}${text}\x1b[39m` };
+
+test("subagent cost shares the parent cost color without restyling other extension statuses", () => {
+	const billed = response(opus);
+	billed.message.usage.cost.total = 0.125;
+	const statuses = new Map([
+		["background", "\nsubagents: $0.250\t"], ["other", "Plain status"], ["isara-fast", "Fast"],
+	]);
+	const lines = withEnv({ PI_EXPERIMENTAL: undefined }, () => footerLines(opus, [billed], coloredTheme, statuses));
+	assert.equal(lines.at(-1),
+		"  \x1b[90m$0.125\x1b[39m\x1b[90m · \x1b[39m\x1b[90msubagents: $0.250\x1b[39m\x1b[90m · \x1b[39mPlain status");
+});
+
+test("an empty background status adds no footer line or colored empty segment", () => {
+	const lines = withEnv({ PI_EXPERIMENTAL: undefined }, () => footerLines(opus, [], coloredTheme,
+		new Map([["background", " \n\t "]])));
+	assert.equal(lines.length, 1);
 });
