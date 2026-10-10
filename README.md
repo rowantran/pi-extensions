@@ -223,8 +223,7 @@ width, and keeps unrecognized content as plain text.
 
 The TUI footer and RPC `setStatus` output show a separate background cost, for
 example `subagents: $0.360`. It uses the same three-decimal dollar format as the
-parent cost in `codex-footer.ts`. A `≥` prefix, as in `subagents: ≥$0.360`,
-means some referenced history is missing or invalid, so the amount is a lower bound.
+parent cost in `codex-footer.ts`, without extra history markers.
 `background_status` and `/background` show the detailed total with agent count,
 tokens, and unavailable sessions; the tool's `details.backgroundUsage` contains
 `{ agents, tokens, cost, unavailable }`. Pi's built-in token and cost

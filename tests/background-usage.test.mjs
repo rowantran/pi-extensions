@@ -155,9 +155,9 @@ test("rewritten histories replace cached spend and newly appended references dis
 	assert.deepEqual(await reader.read([child]), { agents: 1, tokens: 108, cost: 0.75, unavailable: 0 });
 });
 
-test("footer status is a compact subagent cost, marked as a lower bound when history is incomplete", () => {
+test("footer status is a compact subagent cost without history markers", () => {
 	assert.equal(backgroundStatusText({ agents: 0, tokens: 0, cost: 0, unavailable: 0 }), undefined);
 	assert.equal(backgroundStatusText({ agents: 2, tokens: 12_345, cost: 0.3604, unavailable: 0 }), "subagents: $0.360");
 	assert.equal(backgroundStatusText({ agents: 1, tokens: 0, cost: 0, unavailable: 0 }), "subagents: $0.000");
-	assert.equal(backgroundStatusText({ agents: 3, tokens: 99, cost: 1.2344, unavailable: 1 }), "subagents: \u2265$1.234");
+	assert.equal(backgroundStatusText({ agents: 3, tokens: 99, cost: 1.2344, unavailable: 1 }), "subagents: $1.234");
 });
