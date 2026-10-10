@@ -81,6 +81,40 @@ for (const mode of ["rpc", "tui"]) {
 	});
 }
 
+test("/background and the status list show each agent's own cost, not the global or nested total", { timeout: 10_000 }, async t => {
+	const f = fixture(t);
+	const h = harness(t, f);
+	h.ctx.mode = "tui";
+	const planner = savedChild(h, f, "Planner");
+	const reviewer = savedChild(h, f, "Reviewer");
+	addUsage(planner);
+	addUsage(planner);
+	addUsage(reviewer);
+	const plannerSession = SessionManager.open(planner.sessionFile);
+	const nested = createSavedAgent(f.cwd, "Nested", "Offline nested task", { ...h.ctx, sessionManager: plannerSession });
+	plannerSession.appendCustomEntry(AGENT_REFERENCE_ENTRY, { id: nested.id, sessionFile: nested.sessionFile });
+	addUsage(nested);
+	await h.open();
+	await h.call("background_start", { kind: "shell", command: "true", name: "Build" });
+	await h.nextNotice();
+
+	const notifications = [];
+	h.ctx.ui.notify = message => notifications.push(message);
+	await h.command("background");
+	const rows = notifications[0].split("\n");
+	assert.match(rows.find(line => line.startsWith(`${planner.id} [`)), /Planner · \$0\.500$/);
+	assert.match(rows.find(line => line.startsWith(`${reviewer.id} [`)), /Reviewer · \$0\.250$/);
+	assert.match(rows.find(line => line.startsWith("shell-1 [")), /Build$/);
+	assert.match(rows.at(-1), /3 agents · 160 tokens · \$1\.0000$/);
+
+	addUsage(planner, "aborted");
+	const result = await h.call("background_status", {});
+	const updatedRows = result.content[0].text.split("\n");
+	assert.match(updatedRows.find(line => line.startsWith(`${planner.id} [`)), /Planner · \$0\.750$/);
+	assert.match(updatedRows.find(line => line.startsWith(`${reviewer.id} [`)), /Reviewer · \$0\.250$/);
+	assert.deepEqual(result.details.backgroundUsage, { agents: 3, tokens: 200, cost: 1.25, unavailable: 0 });
+});
+
 test("accounting includes every saved reference even when runtime restoration keeps only 20", async t => {
 	const f = fixture(t);
 	const h = harness(t, f);

@@ -30,6 +30,7 @@ export function fixture(t) {
 export function harness(t, f, model = { provider: "discovery-provider", id: "discovery-model" }) {
 	const parent = SessionManager.open(f.parentFile);
 	const tools = new Map();
+	const commands = new Map();
 	const handlers = new Map();
 	const notices = [];
 	const waiting = [];
@@ -40,7 +41,7 @@ export function harness(t, f, model = { provider: "discovery-provider", id: "dis
 	};
 	background({
 		registerTool(tool) { tools.set(tool.name, tool); },
-		registerCommand() {},
+		registerCommand(name, command) { commands.set(name, command); },
 		registerMessageRenderer() {},
 		on(event, handler) { handlers.set(event, handler); },
 		appendEntry(type, data) { parent.appendCustomEntry(type, data); },
@@ -57,6 +58,7 @@ export function harness(t, f, model = { provider: "discovery-provider", id: "dis
 		emit(type, data = {}) { return handlers.get(type)?.({ type, ...data }, ctx); },
 		async open() { await handlers.get("session_start")({}, ctx); },
 		call(name, params) { return tools.get(name).execute("test-call", params, undefined, undefined, ctx); },
+		command(name, args = "") { return commands.get(name).handler(args, ctx); },
 		nextNotice() {
 			if (notices.length) return Promise.resolve(notices.shift());
 			return new Promise((resolve, reject) => {

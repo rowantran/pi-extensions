@@ -821,7 +821,13 @@ export default function background(pi: ExtensionAPI): void {
 		}
 		await Promise.all([...activities.values()].filter((a): a is AgentActivity => a.kind === "agent").map(refreshAgent));
 		const usage = await refreshUsage(true);
-		const listing = activities.size === 0 ? "No background activities." : [...activities.values()].map(activityLine).join("\n");
+		const lines = await Promise.all([...activities.values()].map(async activity => {
+			const line = activityLine(activity);
+			if (activity.kind !== "agent") return line;
+			const ownUsage = await usageReader.read([activity.sessionFile], parentSessionFile, { includeNested: false });
+			return `${line} · $${ownUsage.cost.toFixed(3)}`;
+		}));
+		const listing = lines.length ? lines.join("\n") : "No background activities.";
 		return { text: usage.agents ? `${listing}\nBackground usage (saved, separate from parent): ${backgroundUsageText(usage)}` : listing, usage };
 	}
 
