@@ -230,7 +230,10 @@ export default function codexFooter(pi: ExtensionAPI): void {
 					const statuses = Array.from(extensionStatuses.entries())
 						.filter(([key]) => !MODEL_STATUS_KEYS.includes(key))
 						.sort(([left], [right]) => left.localeCompare(right))
-						.map(([, text]) => sanitizeStatus(text))
+						.map(([key, text]) => {
+							const status = sanitizeStatus(text);
+							return key === "background" && status ? theme.fg("dim", status) : status;
+						})
 						.filter(Boolean);
 					otherSegments.push(...statuses);
 					if (otherSegments.length > 0) {
