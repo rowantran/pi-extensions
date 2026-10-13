@@ -198,14 +198,8 @@ waiting for a wake-up that will never arrive. Do not call it alongside other
 tools or while asking the user a question, presenting a choice, or requesting
 approval.
 
-Use `ask_user` to request user input, including while background work runs. It
-opens a selection dialog when choices are provided, or a text-input dialog
-otherwise, and waits for the user's answer or cancellation. This lets the
-client report that the agent is blocked on the user immediately, rather than
-trying to infer a question from a final text reply. Cancellation is no answer,
-never approval. Managed background agents have no dialog consumer, so `ask_user`
-fails there: the child should include its question in the final result and let
-the parent ask the user.
+Ask questions in the normal response without calling `background_wait`.
+Running background tasks alone do not suppress the completion bell.
 
 In RPC mode, a successful `background_wait` sends
 `ctx.ui.setStatus("waiting-on-background", "Waiting on background task")`.

@@ -59,7 +59,7 @@ test("starting background work does not imply waiting; only background_wait asse
 });
 
 for (const [type, data] of [
-	["tool_execution_start", { toolName: "ask_user", toolCallId: "question" }],
+	["tool_execution_start", { toolName: "read", toolCallId: "read-file" }],
 	["ui_prompt_start", { kind: "input", title: "Deploy?" }],
 	["message_end", { message: { role: "assistant", stopReason: "error" } }],
 	["message_end", { message: { role: "assistant", stopReason: "aborted" } }],

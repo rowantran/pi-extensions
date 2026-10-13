@@ -1058,7 +1058,7 @@ export default function background(pi: ExtensionAPI): void {
 		promptSnippet: "Wait on running background tasks without requesting user attention",
 		promptGuidelines: [
 			"When your only remaining work is waiting for background tasks and no user input is needed, call background_wait as your last tool, then end the turn. It returns immediately; do not poll or repeatedly call it.",
-			"Never call background_wait when asking the user a question, presenting a choice, or requesting approval. Use ask_user for questions, even while background tasks run.",
+			"Never call background_wait when asking the user a question, presenting a choice, or requesting approval, even while background tasks run.",
 		],
 		parameters: Type.Object({}),
 		async execute(_toolCallId, _params, signal, _onUpdate, ctx) {
