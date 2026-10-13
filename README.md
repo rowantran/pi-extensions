@@ -187,6 +187,49 @@ other fields. The guard counts fragments before Pi parses their growing prefix;
 it does not retain their text or affect other tools. Existing background agents
 keep running. Other APIs receive the schema and execution limits only.
 
+### Waiting and user questions
+
+Call `background_wait` as the last tool when the only remaining work is waiting
+on running background tasks and nothing is needed from the user. It returns
+immediately; end the turn and let the existing completion notices wake the
+parent. It does not poll, collect output, or block the model's next step.
+If no task is running, the tool fails so the model can continue instead of
+waiting for a wake-up that will never arrive. Do not call it alongside other
+tools or while asking the user a question, presenting a choice, or requesting
+approval.
+
+Use `ask_user` to request user input, including while background work runs. It
+opens a selection dialog when choices are provided, or a text-input dialog
+otherwise, and waits for the user's answer or cancellation. This lets the
+client report that the agent is blocked on the user immediately, rather than
+trying to infer a question from a final text reply. Cancellation is no answer,
+never approval. Managed background agents have no dialog consumer, so `ask_user`
+fails there: the child should include its question in the final result and let
+the parent ask the user.
+
+In RPC mode, a successful `background_wait` sends
+`ctx.ui.setStatus("waiting-on-background", "Waiting on background task")`.
+The extension clears this entry when a new run starts, another tool starts,
+new user input or a background notice is delivered, a dialog opens, an assistant
+response errors or is cancelled, the last task finishes/stops, or the session
+changes/shuts down. It also clears the entry on session startup, so a previous
+session cannot leave a stale waiting state.
+Waiting is temporary runtime state, not a saved session preference. When a
+background child waits on its own nested tasks, its parent reads the same signal
+and keeps that child running until its actual final settlement. A temporary
+foreground pause does not produce a premature completion notice or release its
+runtime. Sending a new instruction starts an idle waiting child immediately;
+stopping a child shuts down its runtime immediately so nested completion
+notices cannot restart it. Its saved session remains resumable.
+
+This key is an explicit convention with the matching `pi-remote` client, not a
+built-in Pi setting or a child OSC 7501 record. `setStatus` only carries footer
+text in Pi; the updated client hides this reserved entry, keeps its main program
+status at `working` while waiting, and suppresses the completion bell. A dialog
+or error still requests user attention. Without a matching client, RPC clients
+may display the text as an ordinary footer entry. Native Pi TUI, JSON, and print
+modes do not emit this reserved entry or change their existing bell behavior.
+
 ### Message rendering
 
 Background notices show the first line, up to five more content lines, and a

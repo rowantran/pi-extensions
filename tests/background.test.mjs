@@ -75,14 +75,14 @@ test("exact-limit instructions work; oversized sends neither steer nor resume a 
 	const started = await h.call("background_start", { kind: "agent", task: text });
 	assert.equal(readSavedAgent(started.details.sessionFile).task, text);
 	await h.call("background_send", { id: started.details.id, message: text });
-	assert.equal(RpcClient.prototype.steer.mock.calls[0].arguments[0], text);
+	assert.deepEqual(RpcClient.prototype.prompt.mock.calls[1].arguments, [text, undefined, "steer"]);
 	const before = readFileSync(started.details.sessionFile, "utf8");
 	await assert.rejects(h.call("background_send", { id: started.details.id, message: text + " " }), /limited to 16384 characters/);
-	assert.equal(RpcClient.prototype.steer.mock.callCount(), 1);
+	assert.equal(RpcClient.prototype.prompt.mock.callCount(), 2);
 	await h.call("background_stop", { id: started.details.id });
 	await assert.rejects(h.call("background_send", { id: started.details.sessionFile, message: text + "x" }), /limited to 16384 characters/);
 	assert.equal(clients.length, 1);
-	assert.equal(RpcClient.prototype.prompt.mock.callCount(), 1);
+	assert.equal(RpcClient.prototype.prompt.mock.callCount(), 2);
 	assert.equal(readFileSync(started.details.sessionFile, "utf8"), before);
 });
 
