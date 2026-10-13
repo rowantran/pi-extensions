@@ -187,6 +187,40 @@ other fields. The guard counts fragments before Pi parses their growing prefix;
 it does not retain their text or affect other tools. Existing background agents
 keep running. Other APIs receive the schema and execution limits only.
 
+### Waiting and user questions
+
+Call `background_wait` as the last tool when the only remaining work is waiting
+on running background tasks and nothing is needed from the user. It returns
+immediately; end the turn and let the existing completion notices wake the
+parent. It does not poll, collect output, or block the model's next step.
+If no task is running, the tool fails so the model can continue instead of
+waiting for a wake-up that will never arrive. Do not call it alongside other
+tools or while asking the user a question, presenting a choice, or requesting
+approval.
+
+Ask questions in the normal response without calling `background_wait`.
+Running background tasks alone do not suppress the completion bell.
+
+The tool does not set a waiting flag or write a footer entry. The matching
+`pi-remote` client checks the run's last three messages when Pi emits
+`agent_settled`: an assistant message whose only tool call is
+`background_wait`, its matching successful result, and a normal final assistant
+reply with no tool calls. Only that ending keeps the root program status
+`working` without a completion bell. An intervening message, another tool,
+a failed wait, or an error/cancellation does not qualify. Seeing the tool
+finish while the run is still active is not enough.
+
+A parent applies the same completed-run check to a background child waiting
+on its own nested tasks. It keeps the child running until its actual final
+settlement, without a premature completion notice or runtime release. Sending
+a new instruction starts an idle waiting child immediately; stopping a child
+shuts down its runtime immediately so nested completion notices cannot restart
+it. Its saved session remains resumable.
+
+Dialogs and errors still request user attention. Other RPC clients need no
+special footer handling, and native Pi TUI, JSON, and print modes keep their
+existing bell behavior.
+
 ### Message rendering
 
 Background notices show the first line, up to five more content lines, and a

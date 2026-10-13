@@ -35,6 +35,7 @@ import { stripTerminalSequences, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { withCompactToolRendering } from "./compact-tools.ts";
 import { renderBackgroundMessage } from "./background/render.ts";
+import { isBackgroundWaitEnding, type WaitMessage } from "./background/wait.ts";
 import { agentSessionFiles, BackgroundUsageReader, backgroundStatusText, backgroundUsageText, type AgentUsage, type BackgroundUsage } from "./background/usage.ts";
 import { BACKGROUND_WIDGET_ID, backgroundWidgetLines, renderBackgroundWidgetLines } from "./background/widget.ts";
 import {
@@ -117,6 +118,7 @@ interface AgentActivity extends BaseActivity {
 	runId: number;
 	notifiedRunId: number;
 	runError?: string;
+	recentMessages?: WaitMessage[];
 	reapTimer?: NodeJS.Timeout;
 }
 
@@ -310,6 +312,11 @@ export default function background(pi: ExtensionAPI): void {
 		return [...activities.values()].filter(
 			(activity) => activity.state === "running" && (kind === undefined || activity.kind === kind),
 		);
+	}
+
+	function waitable(): Activity[] {
+		// A stopped shell's eventual exit sends no wake-up notice.
+		return running().filter((activity) => activity.kind !== "shell" || !activity.stopRequested);
 	}
 
 	function captureUI(ctx: ExtensionContext): void {
@@ -574,12 +581,29 @@ export default function background(pi: ExtensionAPI): void {
 		);
 	}
 
-	function observeAgent(activity: AgentActivity, event: JsonAgentSessionEvent | { type: "extension_error"; error: string }): void {
+	function observeAgent(activity: AgentActivity, event: JsonAgentSessionEvent | { type: "extension_ui_request"; method: string } | { type: "extension_error"; error: string }): void {
 		switch (event.type) {
 			case "agent_start":
 				addAgentActivity(activity, "agent started a turn");
 				break;
+			case "auto_retry_start": case "compaction_start": {
+				// Pi omits this failed attempt from the context before retrying.
+				// Inner agent_start events are not new logical runs.
+				if (event.type === "auto_retry_start" || event.reason === "overflow") {
+					const last = activity.recentMessages?.at(-1);
+					if (last?.role === "assistant" && (last.stopReason === "error" || last.stopReason === "length")) {
+						activity.recentMessages?.pop();
+					}
+				}
+				break;
+			}
 			case "agent_settled": {
+				// A child may itself be waiting on nested tasks. Keep its slot and
+				// runtime alive until it finishes, not just until its foreground pauses.
+				const waits = !("aborted" in event && event.aborted === true) && !activity.runError
+					&& isBackgroundWaitEnding(activity.recentMessages ?? []);
+				activity.recentMessages = [];
+				if (waits) break;
 				addAgentActivity(activity, "agent completed a run");
 				const runId = activity.runId;
 				void finalizeAgent(activity, runId);
@@ -592,13 +616,14 @@ export default function background(pi: ExtensionAPI): void {
 				addAgentActivity(activity, `finished ${event.toolName}${event.isError ? " with an error" : ""}`);
 				break;
 			case "message_end": {
+				activity.recentMessages = [...(activity.recentMessages ?? []).slice(-2), event.message];
 				const info = messageInfo(event.message);
 				if (info.text) {
 					activity.lastText = info.text;
 					addAgentActivity(activity, "assistant produced an update");
 				}
 				if (info.error) activity.runError = info.error;
-				else if (info.text) activity.runError = undefined;
+				else if (event.message.role === "assistant") activity.runError = undefined;
 				break;
 			}
 			case "extension_error":
@@ -723,6 +748,7 @@ export default function background(pi: ExtensionAPI): void {
 		activity.starting = true;
 		activity.endedAt = undefined;
 		activity.error = activity.runError = undefined;
+		activity.recentMessages = [];
 		activity.lastText = "";
 		try {
 			await activity.reapPromise;
@@ -975,6 +1001,30 @@ export default function background(pi: ExtensionAPI): void {
 	});
 
 	pi.registerTool({
+		name: "background_wait",
+		label: "Background Wait",
+		exposure: "model-only",
+		annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+		description:
+			"Declare that you are ending this run only to wait on running background tasks and need no user input. Returns immediately; completion notices wake you automatically. Call this as your last tool, not alongside other tools. Fails if no background task is running.",
+		promptSnippet: "Wait on running background tasks without requesting user attention",
+		promptGuidelines: [
+			"When your only remaining work is waiting for background tasks and no user input is needed, call background_wait as your last tool, then end the turn. It returns immediately; do not poll or repeatedly call it.",
+			"Never call background_wait when asking the user a question, presenting a choice, or requesting approval, even while background tasks run.",
+		],
+		parameters: Type.Object({}),
+		async execute(_toolCallId, _params, signal) {
+			if (signal?.aborted || shuttingDown) throw new Error("The background wait was cancelled.");
+			const active = waitable();
+			if (!active.length) throw new Error("No background tasks are running. Continue the current turn instead of waiting.");
+			return {
+				content: [{ type: "text", text: "Waiting on background task. End this turn without asking for user input; completion notices will wake you automatically." }],
+				details: { activities: active.map((activity) => activity.id) },
+			};
+		},
+	});
+
+	pi.registerTool({
 		name: "background_status",
 		label: "Background Status",
 		description: "Inspect one retained background activity or list all activities with saved background token/cost totals, separate from the parent session. Do not poll this tool merely to wait; completions arrive automatically.",
@@ -1047,8 +1097,10 @@ export default function background(pi: ExtensionAPI): void {
 			await refreshAgent(activity);
 			if (activity.starting) throw new Error(`${activity.id} is still starting. Retry after startup completes.`);
 			if (activity.state === "running" && activity.client) {
-				await activity.client.steer(message);
-				addAgentActivity(activity, "steering instruction queued");
+				// prompt starts idle children (including background waits) and steers
+				// streaming children atomically. steer alone only queues when idle.
+				await activity.client.prompt(message, undefined, "steer");
+				addAgentActivity(activity, "instruction accepted");
 			} else {
 				await startAgentRun(activity, message);
 			}
@@ -1094,10 +1146,12 @@ export default function background(pi: ExtensionAPI): void {
 			activity.endedAt = activity.updatedAt = Date.now();
 			updateWidget();
 			try {
-				await activity.client?.abort();
+				// Shutdown aborts the active run and nested jobs, including an idle
+				// waiting child. The reap promise also makes concurrent resumes
+				// wait for shutdown instead of letting stop kill a newer run.
+				await reapAgentRuntime(activity);
 			} finally {
 				addAgentActivity(activity, "agent run stopped");
-				scheduleAgentReap(activity);
 				pruneFinished();
 				await refreshUsage(true);
 			}
