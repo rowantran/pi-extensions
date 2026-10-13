@@ -12,10 +12,9 @@ import {
 	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import background from "../background.ts";
+import { isBackgroundWaitEnding } from "../background/wait.ts";
 import { fixture } from "./background-helpers.mjs";
 
-const STATUS_KEY = "waiting-on-background";
-const STATUS_TEXT = "Waiting on background task";
 const provider = "background-wait-integration-test";
 const cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 const usage = { input: 5, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 10, cost: { ...cost, total: 0 } };
@@ -95,10 +94,12 @@ function streamReply(f, model, context, options) {
 
 async function setup(t) {
 	const f = Object.assign(fixture(t), {
-		steps: [], requests: [], timeline: [], statuses: [], currentStatus: undefined,
+		steps: [], requests: [], timeline: [], statuses: [],
 		providerErrors: [], extensionErrors: [], pids: new Set(),
 	});
-	f.record = (event) => f.timeline.push({ ...event, waiting: f.currentStatus });
+	f.record = (event) => f.timeline.push({ ...event,
+		...(event.type === "agent_settled" ? { waiting: isBackgroundWaitEnding(f.session.messages) } : {}),
+	});
 	const fetch = t.mock.method(globalThis, "fetch", () => { throw new Error("Network access is forbidden in background wait integration tests"); });
 	mkdirSync(f.agentDir, { recursive: true });
 	const authPath = join(f.agentDir, "auth.json");
@@ -152,12 +153,7 @@ async function setup(t) {
 	await session.bindExtensions({
 		mode: "rpc",
 		uiContext: {
-			setStatus(key, value) {
-				if (key !== STATUS_KEY) return;
-				f.currentStatus = value;
-				f.statuses.push(value);
-				f.record({ type: "status", key, value });
-			},
+			setStatus(key, value) { f.statuses.push([key, value]); },
 			setWidget() {}, notify() {},
 		},
 		onError: (error) => f.extensionErrors.push(error),
@@ -187,7 +183,7 @@ test("a failed background_wait automatically follows up in the same real SDK run
 	assert.equal(f.requests.length, 2, "The failed tool result triggers a model follow-up without a second user prompt");
 	assert.ok(f.requests.every(({ tools }) => tools.includes("background_wait")));
 	assert.equal(f.session.getLastAssistantText(), "No background work is running; continuing now.");
-	assert.deepEqual(f.statuses, [undefined]);
+	assert.ok(f.statuses.every(([key]) => key === "background"));
 	assert.equal(f.timeline.filter((event) => event.type === "agent_start").length, 1);
 	assert.equal(f.timeline.filter((event) => event.type === "agent_settled").length, 1);
 	const failed = f.timeline.findIndex((event) => event.type === "tool_execution_end" && event.toolName === "background_wait");
@@ -195,7 +191,7 @@ test("a failed background_wait automatically follows up in the same real SDK run
 	const settled = f.timeline.findIndex((event) => event.type === "agent_settled");
 	assert.equal(f.timeline[failed].isError, true);
 	assert.ok(failed < followUp && followUp < settled, "Failure precedes the automatic response, which precedes settlement");
-	assert.ok(f.timeline.every((event) => event.waiting === undefined));
+	assert.equal(f.timeline.find((event) => event.type === "agent_settled").waiting, false);
 });
 
 test("waiting survives settlement and clears before a plain-text question on the next run", { timeout: 20_000 }, async (t) => {
@@ -208,32 +204,34 @@ test("waiting survives settlement and clears before a plain-text question on the
 			const wait = resultsOf(messages, "background_wait").at(-1);
 			assert.equal(start.isError, false);
 			assert.equal(wait.isError, false);
-			assert.deepEqual(wait.details, { waitingOnBackground: true, activities: [start.details.id] });
+			assert.deepEqual(wait.details, { activities: [start.details.id] });
+			assert.equal(isBackgroundWaitEnding(f.session.messages), false, "The final reply is not complete yet");
 		}),
 	);
 	await f.session.prompt("Start a long background task, then wait for it.");
 	f.assertHealthy();
 	assert.equal(f.requests.length, 3);
 	assert.equal(f.session.getLastAssistantText(), "Waiting for the background task.");
-	assert.equal(f.currentStatus, STATUS_TEXT, "Final text must not clear a successful wait");
-	assert.equal(f.timeline.find((event) => event.type === "agent_settled").waiting, STATUS_TEXT);
-	assert.deepEqual(f.statuses, [undefined, STATUS_TEXT]);
+	assert.equal(isBackgroundWaitEnding(f.session.messages), true);
+	assert.equal(f.timeline.find((event) => event.type === "agent_settled").waiting, true);
+	assert.ok(f.statuses.every(([key]) => key === "background"), "Waiting adds no footer status");
 	assert.equal(f.pids.size, 1);
 	assert.ok([...f.pids].every(isAlive), "The actual sleep process is still running after settlement");
 
 	const question = "Should I keep the task running?";
 	const boundary = f.timeline.length;
 	f.steps.push(finalText(question, () => {
-		assert.equal(f.currentStatus, undefined, "A new run clears the previous waiting decision before asking");
+		assert.equal(isBackgroundWaitEnding(f.session.messages), false, "New input makes the previous wait ending ineligible");
 	}));
 	await f.session.prompt("Ask me whether to keep the task running.");
 	f.assertHealthy();
 	assert.equal(f.requests.length, 4);
 	assert.equal(f.session.getLastAssistantText(), question);
-	assert.deepEqual(f.statuses, [undefined, STATUS_TEXT, undefined]);
+	assert.equal(isBackgroundWaitEnding(f.session.messages), false);
+	assert.ok(f.statuses.every(([key]) => key === "background"));
 	assert.ok([...f.pids].every(isAlive), "A running task alone must not suppress a question");
 	const events = f.timeline.slice(boundary);
 	assert.equal(events.filter((event) => event.type === "agent_start").length, 1);
 	assert.equal(events.filter((event) => event.type === "agent_settled").length, 1);
-	assert.equal(events.find((event) => event.type === "agent_settled").waiting, undefined);
+	assert.equal(events.find((event) => event.type === "agent_settled").waiting, false);
 });

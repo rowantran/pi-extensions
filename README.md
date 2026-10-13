@@ -201,28 +201,25 @@ approval.
 Ask questions in the normal response without calling `background_wait`.
 Running background tasks alone do not suppress the completion bell.
 
-In RPC mode, a successful `background_wait` sends
-`ctx.ui.setStatus("waiting-on-background", "Waiting on background task")`.
-The extension clears this entry when a new run starts, another tool starts,
-new user input or a background notice is delivered, a dialog opens, an assistant
-response errors or is cancelled, the last task finishes/stops, or the session
-changes/shuts down. It also clears the entry on session startup, so a previous
-session cannot leave a stale waiting state.
-Waiting is temporary runtime state, not a saved session preference. When a
-background child waits on its own nested tasks, its parent reads the same signal
-and keeps that child running until its actual final settlement. A temporary
-foreground pause does not produce a premature completion notice or release its
-runtime. Sending a new instruction starts an idle waiting child immediately;
-stopping a child shuts down its runtime immediately so nested completion
-notices cannot restart it. Its saved session remains resumable.
+The tool does not set a waiting flag or write a footer entry. The matching
+`pi-remote` client checks the run's last three messages when Pi emits
+`agent_settled`: an assistant message whose only tool call is
+`background_wait`, its matching successful result, and a normal final assistant
+reply with no tool calls. Only that ending keeps the root program status
+`working` without a completion bell. An intervening message, another tool,
+a failed wait, or an error/cancellation does not qualify. Seeing the tool
+finish while the run is still active is not enough.
 
-This key is an explicit convention with the matching `pi-remote` client, not a
-built-in Pi setting or a child OSC 7501 record. `setStatus` only carries footer
-text in Pi; the updated client hides this reserved entry, keeps its main program
-status at `working` while waiting, and suppresses the completion bell. A dialog
-or error still requests user attention. Without a matching client, RPC clients
-may display the text as an ordinary footer entry. Native Pi TUI, JSON, and print
-modes do not emit this reserved entry or change their existing bell behavior.
+A parent applies the same completed-run check to a background child waiting
+on its own nested tasks. It keeps the child running until its actual final
+settlement, without a premature completion notice or runtime release. Sending
+a new instruction starts an idle waiting child immediately; stopping a child
+shuts down its runtime immediately so nested completion notices cannot restart
+it. Its saved session remains resumable.
+
+Dialogs and errors still request user attention. Other RPC clients need no
+special footer handling, and native Pi TUI, JSON, and print modes keep their
+existing bell behavior.
 
 ### Message rendering
 

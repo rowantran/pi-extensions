@@ -29,13 +29,13 @@ import {
 	type ExtensionAPI,
 	type ExtensionContext,
 	type JsonAgentSessionEvent,
-	type RpcExtensionUIRequest,
 } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { stripTerminalSequences, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { withCompactToolRendering } from "./compact-tools.ts";
 import { renderBackgroundMessage } from "./background/render.ts";
+import { isBackgroundWaitEnding, type WaitMessage } from "./background/wait.ts";
 import { agentSessionFiles, BackgroundUsageReader, backgroundStatusText, backgroundUsageText, type AgentUsage, type BackgroundUsage } from "./background/usage.ts";
 import { BACKGROUND_WIDGET_ID, backgroundWidgetLines, renderBackgroundWidgetLines } from "./background/widget.ts";
 import {
@@ -65,10 +65,6 @@ const USAGE_TICK_MS = 5_000;
 const KILL_ESCALATION_MS = 5_000;
 const MAX_INSTRUCTION_CHARS = 16_384;
 const MAX_ARGUMENT_BYTES = 128 * 1_024;
-
-// RPC convention shared with pi-remote, not a built-in Pi or OSC status key.
-const WAITING_ON_BACKGROUND_STATUS_KEY = "waiting-on-background";
-const WAITING_ON_BACKGROUND_STATUS_TEXT = "Waiting on background task";
 
 function checkInstructionLength(text: string | undefined): void {
 	if (text && text.length > MAX_INSTRUCTION_CHARS) {
@@ -122,7 +118,7 @@ interface AgentActivity extends BaseActivity {
 	runId: number;
 	notifiedRunId: number;
 	runError?: string;
-	waitingOnBackground?: boolean;
+	recentMessages?: WaitMessage[];
 	reapTimer?: NodeJS.Timeout;
 }
 
@@ -270,55 +266,6 @@ export default function background(pi: ExtensionAPI): void {
 	let lastUsageStatus: string | undefined;
 	let usageStatusInitialized = false;
 	let shuttingDown = false;
-	let waitingOnBackground = false;
-	let openPrompts = 0;
-	const executingTools = new Set<string>();
-
-	function setWaitingOnBackground(waiting: boolean, force = false): void {
-		if (!force && waitingOnBackground === waiting) return;
-		waitingOnBackground = waiting;
-		if (mode === "rpc") {
-			try {
-				ui?.setStatus(WAITING_ON_BACKGROUND_STATUS_KEY, waiting ? WAITING_ON_BACKGROUND_STATUS_TEXT : undefined);
-			} catch {
-				// An expired UI must not prevent completion delivery or cleanup.
-			}
-		}
-	}
-
-	pi.on("agent_start", () => {
-		executingTools.clear();
-		setWaitingOnBackground(false);
-	});
-	pi.on("tool_execution_start", (event) => {
-		if (event.toolName === "background_wait") return;
-		executingTools.add(event.toolCallId);
-		setWaitingOnBackground(false);
-	});
-	pi.on("tool_execution_end", (event) => {
-		executingTools.delete(event.toolCallId);
-		if (event.isError) setWaitingOnBackground(false);
-	});
-	pi.on("ui_prompt_start", () => {
-		openPrompts++;
-		setWaitingOnBackground(false);
-	});
-	pi.on("ui_prompt_end", () => { openPrompts = Math.max(0, openPrompts - 1); });
-	pi.on("message_start", (event) => {
-		if (event.message.role === "user" || (event.message.role === "custom" && event.message.customType === "background")) {
-			setWaitingOnBackground(false);
-		}
-	});
-	pi.on("session_tree", () => {
-		openPrompts = 0;
-		executingTools.clear();
-		setWaitingOnBackground(false);
-	});
-	pi.on("message_end", (event) => {
-		if (event.message.role === "assistant" && (event.message.stopReason === "error" || event.message.stopReason === "aborted")) {
-			setWaitingOnBackground(false);
-		}
-	});
 
 	// OpenAI Responses exposes argument fragments before Pi repeatedly parses
 	// their growing prefix. Count only bytes, without retaining or parsing text.
@@ -376,9 +323,6 @@ export default function background(pi: ExtensionAPI): void {
 		clearUsageTimer();
 		ui = ctx.ui;
 		mode = ctx.mode;
-		openPrompts = 0;
-		executingTools.clear();
-		setWaitingOnBackground(false, true);
 		parentSessionFile = ctx.sessionManager.getSessionFile();
 		usageFiles = agentSessionFiles(ctx.sessionManager.getEntries());
 		usageReader = new BackgroundUsageReader();
@@ -431,7 +375,6 @@ export default function background(pi: ExtensionAPI): void {
 	}
 
 	function updateWidget(): void {
-		if (waitingOnBackground && waitable().length === 0) setWaitingOnBackground(false);
 		if (shuttingDown || !ui || (mode !== "tui" && mode !== "rpc")) {
 			clearWidgetTimer();
 			return;
@@ -638,21 +581,29 @@ export default function background(pi: ExtensionAPI): void {
 		);
 	}
 
-	function observeAgent(activity: AgentActivity, event: JsonAgentSessionEvent | RpcExtensionUIRequest | { type: "extension_error"; error: string }): void {
+	function observeAgent(activity: AgentActivity, event: JsonAgentSessionEvent | { type: "extension_ui_request"; method: string } | { type: "extension_error"; error: string }): void {
 		switch (event.type) {
-			case "extension_ui_request":
-				if (event.method === "setStatus" && event.statusKey === WAITING_ON_BACKGROUND_STATUS_KEY) {
-					activity.waitingOnBackground = event.statusText === WAITING_ON_BACKGROUND_STATUS_TEXT;
-				}
-				break;
 			case "agent_start":
-				activity.waitingOnBackground = false;
 				addAgentActivity(activity, "agent started a turn");
 				break;
+			case "auto_retry_start": case "compaction_start": {
+				// Pi omits this failed attempt from the context before retrying.
+				// Inner agent_start events are not new logical runs.
+				if (event.type === "auto_retry_start" || event.reason === "overflow") {
+					const last = activity.recentMessages?.at(-1);
+					if (last?.role === "assistant" && (last.stopReason === "error" || last.stopReason === "length")) {
+						activity.recentMessages?.pop();
+					}
+				}
+				break;
+			}
 			case "agent_settled": {
 				// A child may itself be waiting on nested tasks. Keep its slot and
 				// runtime alive until it finishes, not just until its foreground pauses.
-				if (activity.waitingOnBackground && !activity.runError) break;
+				const waits = !("aborted" in event && event.aborted === true) && !activity.runError
+					&& isBackgroundWaitEnding(activity.recentMessages ?? []);
+				activity.recentMessages = [];
+				if (waits) break;
 				addAgentActivity(activity, "agent completed a run");
 				const runId = activity.runId;
 				void finalizeAgent(activity, runId);
@@ -665,6 +616,7 @@ export default function background(pi: ExtensionAPI): void {
 				addAgentActivity(activity, `finished ${event.toolName}${event.isError ? " with an error" : ""}`);
 				break;
 			case "message_end": {
+				activity.recentMessages = [...(activity.recentMessages ?? []).slice(-2), event.message];
 				const info = messageInfo(event.message);
 				if (info.text) {
 					activity.lastText = info.text;
@@ -796,7 +748,7 @@ export default function background(pi: ExtensionAPI): void {
 		activity.starting = true;
 		activity.endedAt = undefined;
 		activity.error = activity.runError = undefined;
-		activity.waitingOnBackground = false;
+		activity.recentMessages = [];
 		activity.lastText = "";
 		try {
 			await activity.reapPromise;
@@ -1061,18 +1013,13 @@ export default function background(pi: ExtensionAPI): void {
 			"Never call background_wait when asking the user a question, presenting a choice, or requesting approval, even while background tasks run.",
 		],
 		parameters: Type.Object({}),
-		async execute(_toolCallId, _params, signal, _onUpdate, ctx) {
-			if (!ui) captureUI(ctx);
-			setWaitingOnBackground(false);
+		async execute(_toolCallId, _params, signal) {
 			if (signal?.aborted || shuttingDown) throw new Error("The background wait was cancelled.");
-			if (openPrompts) throw new Error("A dialog is waiting for user input. Do not wait on background tasks while the user is needed.");
-			if (executingTools.size) throw new Error("Other tools are still executing. Call background_wait by itself as your last tool.");
 			const active = waitable();
 			if (!active.length) throw new Error("No background tasks are running. Continue the current turn instead of waiting.");
-			setWaitingOnBackground(true);
 			return {
 				content: [{ type: "text", text: "Waiting on background task. End this turn without asking for user input; completion notices will wake you automatically." }],
-				details: { waitingOnBackground: true, activities: active.map((activity) => activity.id) },
+				details: { activities: active.map((activity) => activity.id) },
 			};
 		},
 	});
@@ -1284,9 +1231,6 @@ export default function background(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_shutdown", async () => {
-		setWaitingOnBackground(false);
-		openPrompts = 0;
-		executingTools.clear();
 		shuttingDown = true;
 		usageGeneration++;
 		clearUsageTimer();

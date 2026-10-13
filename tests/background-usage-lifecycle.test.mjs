@@ -52,7 +52,7 @@ for (const mode of ["rpc", "tui"]) {
 		assert.deepEqual(result.details.backgroundUsage, { agents: 1, tokens: 40, cost: 0.25, unavailable: 0 });
 		assert.equal(result.usage, undefined, "Separate accounting must not change Pi's own total");
 		assert.match(result.content[0].text, /Background usage \(saved, separate from parent\): 1 agent · 40 tokens · \$0\.2500/);
-		assert.equal(statuses.filter(([key]) => key === "background").length, 1, "Unchanged stats do not generate RPC status traffic");
+		assert.equal(statuses.length, 1, "Unchanged stats do not generate RPC status traffic");
 		assert.equal(readFileSync(f.parentFile, "utf8"), beforeQueries, "Accounting writes nothing to the parent");
 
 		// No local child process is running. The timer must still discover spend

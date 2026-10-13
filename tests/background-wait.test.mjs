@@ -2,10 +2,16 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { RpcClient } from "@earendil-works/pi-coding-agent";
 import { readSavedAgent } from "../background/sessions.ts";
+import { isBackgroundWaitEnding } from "../background/wait.ts";
 import { fixture, harness } from "./background-helpers.mjs";
 
-const STATUS_KEY = "waiting-on-background";
-const STATUS_TEXT = "Waiting on background task";
+function waitEnding() {
+	return [
+		{ role: "assistant", stopReason: "toolUse", content: [{ type: "toolCall", name: "background_wait", id: "wait", arguments: {} }] },
+		{ role: "toolResult", toolName: "background_wait", toolCallId: "wait", isError: false, content: [] },
+		{ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Waiting for the task." }] },
+	];
+}
 
 function setup(t, mode = "rpc") {
 	const f = fixture(t);
@@ -21,157 +27,140 @@ function setup(t, mode = "rpc") {
 	const h = harness(t, f);
 	h.ctx.mode = mode;
 	const statuses = [];
-	h.ctx.ui.setStatus = (key, value) => { if (key === STATUS_KEY) statuses.push(value); };
+	h.ctx.ui.setStatus = (...args) => statuses.push(args);
+	const emit = (event, client = clients.at(-1)) => { for (const listener of client.eventListeners) listener(event); };
 	return {
-		...h, statuses, clients,
+		...h, statuses, clients, emit,
 		start() { return h.call("background_start", { kind: "agent", task: "Long task" }); },
-		settle(client = clients.at(-1)) { for (const listener of client.eventListeners) listener({ type: "agent_settled" }); },
+		messages(messages, client) { for (const message of messages) emit({ type: "message_end", message }, client); },
+		settle(client, extra = {}) { emit({ type: "agent_settled", ...extra }, client); },
 	};
 }
 
-test("background_wait fails without running work and leaves no waiting status", async t => {
+test("background_wait fails without running work, including retained stopped activities", async t => {
 	const h = setup(t);
 	await h.open();
 	await assert.rejects(h.call("background_wait", {}), /No background tasks are running/);
-	assert.deepEqual(h.statuses, [undefined]);
 	assert.equal(h.tools.get("background_wait").exposure, "model-only", "Waiting must not be nested inside codemode");
 	const first = await h.start();
 	await h.call("background_stop", { id: first.details.id });
 	await assert.rejects(h.call("background_wait", {}), /No background tasks are running/);
-	assert.deepEqual(h.statuses, [undefined], "Retained but stopped activities do not count");
 });
 
-test("starting background work does not imply waiting; only background_wait asserts the signal", async t => {
-	const h = setup(t);
-	await h.open();
-	const first = await h.start();
-	assert.deepEqual(h.statuses, [undefined]);
-	await h.emit("tool_execution_start", { toolName: "background_wait", toolCallId: "wait" });
-	const result = await h.call("background_wait", {});
-	await h.emit("tool_execution_end", { toolName: "background_wait", toolCallId: "wait", isError: false });
-	assert.deepEqual(result.details, { waitingOnBackground: true, activities: [first.details.id] });
-	assert.deepEqual(h.statuses, [undefined, STATUS_TEXT]);
-	await h.emit("message_end", { message: { role: "assistant", stopReason: "stop" } });
-	await h.emit("agent_settled");
-	assert.equal(h.statuses.at(-1), STATUS_TEXT, "The signal survives a successful final reply and settlement");
-	await h.emit("agent_start");
-	assert.equal(h.statuses.at(-1), undefined, "A new run must make its own waiting decision");
-});
-
-for (const [type, data] of [
-	["tool_execution_start", { toolName: "read", toolCallId: "read-file" }],
-	["ui_prompt_start", { kind: "input", title: "Deploy?" }],
-	["message_end", { message: { role: "assistant", stopReason: "error" } }],
-	["message_end", { message: { role: "assistant", stopReason: "aborted" } }],
-	["message_start", { message: { role: "user", content: "New instruction" } }],
-	["message_start", { message: { role: "custom", customType: "background", content: "Progress update" } }],
-	["session_start", {}], ["session_tree", {}],
-]) {
-	test(`${type} ${data.message?.stopReason ?? data.message?.role ?? data.toolName ?? data.kind ?? ""} clears waiting`, async t => {
-		const h = setup(t);
+for (const mode of ["rpc", "tui", "json", "print"]) {
+	test(`background_wait returns immediately without changing footer status in ${mode} mode`, async t => {
+		const h = setup(t, mode);
 		await h.open();
-		await h.start();
-		await h.call("background_wait", {});
-		await h.emit(type, data);
-		assert.deepEqual(h.statuses, [undefined, STATUS_TEXT, undefined]);
+		const child = await h.start();
+		const before = h.statuses.length;
+		const result = await h.call("background_wait", {});
+		assert.deepEqual(result.details, { activities: [child.details.id] });
+		assert.match(result.content[0].text, /End this turn without asking for user input/);
+		assert.equal(h.statuses.length, before);
+		assert.ok(h.statuses.every(([key]) => key === "background"), "Only normal usage accounting may write footer status");
 	});
 }
 
-test("background_wait rejects an in-flight sibling tool; later parallel tools cancel waiting", async t => {
-	const h = setup(t);
-	await h.open();
-	await h.start();
-	await h.emit("tool_execution_start", { toolName: "read", toolCallId: "read" });
-	await assert.rejects(h.call("background_wait", {}), /Other tools are still executing/);
-	assert.deepEqual(h.statuses, [undefined]);
-	await h.emit("tool_execution_end", { toolName: "read", toolCallId: "read", isError: false });
-	await h.call("background_wait", {});
-	await h.emit("tool_execution_start", { toolName: "read", toolCallId: "later" });
-	assert.equal(h.statuses.at(-1), undefined);
-});
-
-test("the last child's completion clears waiting before the parent receives its wake-up notice", async t => {
-	const h = setup(t);
-	await h.open();
-	await h.start();
-	await h.start();
-	await h.call("background_wait", {});
-	h.settle(h.clients[0]);
-	await h.nextNotice();
-	assert.equal(h.statuses.at(-1), STATUS_TEXT, "Other background work remains");
-	h.settle(h.clients[1]);
-	assert.equal(h.statuses.at(-1), undefined, "Clear synchronously before async result retrieval");
-	await h.nextNotice();
-	await assert.rejects(h.call("background_wait", {}), /No background tasks are running/);
-});
-
-test("a child waiting on nested background work remains running until its actual final settlement", async t => {
+test("a child waits only after agent_settled and resumes without a premature completion notice", async t => {
 	const h = setup(t);
 	await h.open();
 	const child = await h.start();
-	await h.call("background_wait", {});
-	const emit = event => { for (const listener of h.clients[0].eventListeners) listener(event); };
-	// A successful retry may contain only tool calls, not text. It must clear an older error.
-	emit({ type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: "Temporary failure" } });
-	emit({ type: "message_end", message: { role: "assistant", content: [], stopReason: "toolUse" } });
-	emit({ type: "extension_ui_request", method: "setStatus", statusKey: STATUS_KEY, statusText: STATUS_TEXT });
+	// A recovered reply must clear an older error before evaluating this run.
+	h.messages([{ role: "assistant", content: [], stopReason: "error", errorMessage: "Temporary failure" }, ...waitEnding()]);
+	h.emit({ type: "agent_end", messages: waitEnding() });
+	assert.equal(RpcClient.prototype.getLastAssistantText.mock.callCount(), 0);
 	h.settle();
-	assert.equal(RpcClient.prototype.getLastAssistantText.mock.callCount(), 0, "A temporary child pause is not completion");
-	assert.equal(h.statuses.at(-1), STATUS_TEXT);
+	assert.equal(RpcClient.prototype.getLastAssistantText.mock.callCount(), 0, "A temporary pause is not child completion");
 	assert.match((await h.call("background_status", { id: child.details.id })).content[0].text, /running/);
-	emit({ type: "extension_ui_request", method: "setStatus", statusKey: STATUS_KEY });
-	assert.equal(h.statuses.at(-1), STATUS_TEXT, "A status clear alone is not child completion");
-	emit({ type: "agent_start" });
+	h.emit({ type: "agent_start" });
+	h.messages([{ role: "assistant", content: [{ type: "text", text: "Finished" }], stopReason: "stop" }]);
 	h.settle();
-	assert.equal(h.statuses.at(-1), undefined);
 	assert.equal((await h.nextNotice()).details.state, "completed");
 	assert.equal(RpcClient.prototype.getLastAssistantText.mock.callCount(), 1);
 });
 
-test("a failed child cannot remain waiting on nested work", async t => {
+for (const [type, stopReason] of [["auto_retry_start", "error"], ["compaction_start", "error"], ["compaction_start", "length"]]) {
+	test(`a recovered ${type} ${stopReason} attempt preserves the current run's wait`, async t => {
+		const h = setup(t);
+		await h.open();
+		await h.start();
+		const ending = waitEnding();
+		h.messages(ending.slice(0, 2));
+		h.messages([{ role: "assistant", content: [], stopReason, errorMessage: "Temporary failure" }]);
+		h.emit({ type, reason: "overflow" });
+		h.emit({ type: "agent_start" });
+		h.messages([ending[2]]);
+		h.settle();
+		assert.equal(RpcClient.prototype.getLastAssistantText.mock.callCount(), 0, "Recovery is part of the same logical run");
+		h.emit({ type: "agent_start" });
+		h.messages([{ role: "assistant", content: [], stopReason: "stop" }]);
+		h.settle();
+		assert.equal((await h.nextNotice()).details.state, "completed");
+	});
+}
+
+test("cancelling a retry after a failed final reply cannot leave the child waiting", async t => {
 	const h = setup(t);
 	await h.open();
 	await h.start();
-	await h.call("background_wait", {});
-	for (const event of [
-		{ type: "extension_ui_request", method: "setStatus", statusKey: STATUS_KEY, statusText: STATUS_TEXT },
-		{ type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: "Child failed" } },
-	]) for (const listener of h.clients[0].eventListeners) listener(event);
-	// Result retrieval returns empty output, so it cannot overwrite the observed error.
+	h.messages([...waitEnding().slice(0, 2), { role: "assistant", content: [], stopReason: "error", errorMessage: "Overloaded" }]);
+	h.emit({ type: "auto_retry_start" });
+	h.emit({ type: "auto_retry_end", success: false, finalError: "Retry cancelled" });
 	RpcClient.prototype.getLastAssistantText.mock.mockImplementation(async () => "");
 	h.settle();
-	assert.equal(h.statuses.at(-1), undefined);
 	assert.equal((await h.nextNotice()).details.state, "failed");
+});
+
+for (const [name, ending, extra] of [
+	["error", [...waitEnding(), { role: "assistant", content: [], stopReason: "error", errorMessage: "Child failed" }]],
+	["abort reply", [...waitEnding(), { role: "assistant", content: [], stopReason: "aborted" }]],
+	["newer aborted settlement", waitEnding(), { aborted: true }],
+	["new input", [...waitEnding(), { role: "user", content: "Change direction" }]],
+]) {
+	test(`a child cannot keep waiting after ${name}`, async t => {
+		const h = setup(t);
+		await h.open();
+		await h.start();
+		h.messages(ending);
+		RpcClient.prototype.getLastAssistantText.mock.mockImplementation(async () => "");
+		h.settle(undefined, extra);
+		assert.equal((await h.nextNotice()).details.state, name === "error" ? "failed" : "completed");
+	});
+}
+
+test("a new child run cannot reuse the previous run's wait ending", async t => {
+	const h = setup(t);
+	await h.open();
+	await h.start();
+	h.messages(waitEnding());
+	h.settle();
+	h.emit({ type: "agent_start" });
+	h.settle();
+	assert.equal((await h.nextNotice()).details.state, "completed");
 });
 
 test("sending to an idle waiting child starts it instead of only queuing steering", async t => {
 	const h = setup(t);
 	await h.open();
 	const child = await h.start();
-	for (const listener of h.clients[0].eventListeners) listener({ type: "extension_ui_request", method: "setStatus", statusKey: STATUS_KEY, statusText: STATUS_TEXT });
+	h.messages(waitEnding());
 	h.settle();
 	await h.call("background_send", { id: child.details.id, message: "Change direction" });
 	assert.deepEqual(RpcClient.prototype.prompt.mock.calls[1].arguments, ["Change direction", undefined, "steer"]);
 	assert.equal(RpcClient.prototype.steer.mock.callCount(), 0);
 });
 
-for (const cleared of [false, true]) {
-	test(`stopping a waiting child immediately releases its runtime (status cleared: ${cleared})`, async t => {
-		const h = setup(t);
-		await h.open();
-		const child = await h.start();
-		await h.call("background_wait", {});
-		const client = h.clients[0];
-		for (const listener of client.eventListeners) listener({ type: "extension_ui_request", method: "setStatus", statusKey: STATUS_KEY, statusText: STATUS_TEXT });
-		h.settle();
-		if (cleared) for (const listener of client.eventListeners) listener({ type: "extension_ui_request", method: "setStatus", statusKey: STATUS_KEY });
-		await h.call("background_stop", { id: child.details.id });
-		assert.equal(RpcClient.prototype.stop.mock.callCount(), 1);
-		assert.equal(h.statuses.at(-1), undefined);
-		for (const listener of client.eventListeners) listener({ type: "agent_settled" });
-		assert.equal(RpcClient.prototype.getLastAssistantText.mock.callCount(), 0, "The stopped child cannot produce a late completion");
-	});
-}
+test("stopping a waiting child immediately releases its runtime and ignores late completion", async t => {
+	const h = setup(t);
+	await h.open();
+	const child = await h.start();
+	h.messages(waitEnding());
+	h.settle();
+	await h.call("background_stop", { id: child.details.id });
+	assert.equal(RpcClient.prototype.stop.mock.callCount(), 1);
+	h.settle();
+	assert.equal(RpcClient.prototype.getLastAssistantText.mock.callCount(), 0);
+});
 
 test("resuming during a stop waits for the old runtime and cannot be killed by that stop", async t => {
 	const h = setup(t);
@@ -195,24 +184,11 @@ test("a crashed child waiting on nested work still fails and wakes the parent", 
 	const h = setup(t);
 	await h.open();
 	const child = await h.start();
-	await h.call("background_wait", {});
-	for (const listener of h.clients[0].eventListeners) listener({ type: "extension_ui_request", method: "setStatus", statusKey: STATUS_KEY, statusText: STATUS_TEXT });
+	h.messages(waitEnding());
 	h.settle();
 	RpcClient.prototype.getState.mock.mockImplementation(async () => { throw new Error("Child process exited"); });
 	await h.call("background_status", { id: child.details.id });
 	assert.equal((await h.nextNotice()).details.state, "failed");
-	assert.equal(h.statuses.at(-1), undefined);
-});
-
-test("an already open dialog prevents background_wait until it closes", async t => {
-	const h = setup(t);
-	await h.open();
-	await h.start();
-	await h.emit("ui_prompt_start", { kind: "input" });
-	await assert.rejects(h.call("background_wait", {}), /dialog is waiting for user input/);
-	await h.emit("ui_prompt_end", { kind: "input" });
-	await h.call("background_wait", {});
-	assert.equal(h.statuses.at(-1), STATUS_TEXT);
 });
 
 test("a stopping shell cannot be used as a future wake-up", async t => {
@@ -221,55 +197,50 @@ test("a stopping shell cannot be used as a future wake-up", async t => {
 	const shell = await h.call("background_start", { kind: "shell", command: "sleep 60" });
 	await h.call("background_stop", { id: shell.details.id });
 	await assert.rejects(h.call("background_wait", {}), /No background tasks are running/);
-	assert.equal(h.statuses.at(-1), undefined);
 });
 
-test("shell completion clears waiting and still delivers its completion notice", { timeout: 5_000 }, async t => {
+test("shell completion still delivers its completion notice after background_wait", { timeout: 5_000 }, async t => {
 	const h = setup(t);
 	await h.open();
-	// Enough time for a deterministic synchronous wait declaration, without long-running children.
 	await h.call("background_start", { kind: "shell", command: "sleep 0.1" });
 	await h.call("background_wait", {});
-	assert.equal(h.statuses.at(-1), STATUS_TEXT);
 	await h.nextNotice();
-	assert.equal(h.statuses.at(-1), undefined);
+	await assert.rejects(h.call("background_wait", {}), /No background tasks are running/);
 });
 
-test("shutdown clears waiting, and cancellation never sets it", async t => {
+test("background_wait rejects cancellation and shutdown", async t => {
 	const h = setup(t);
 	await h.open();
 	await h.start();
 	const controller = new AbortController();
 	controller.abort();
 	await assert.rejects(h.tools.get("background_wait").execute("cancelled", {}, controller.signal, undefined, h.ctx), /cancelled/);
-	assert.deepEqual(h.statuses, [undefined]);
-	await h.call("background_wait", {});
 	await h.close();
-	assert.equal(h.statuses.at(-1), undefined);
+	await assert.rejects(h.call("background_wait", {}), /cancelled/);
 });
 
-test("an expired status UI cannot prevent a completion wake-up", async t => {
-	const h = setup(t);
-	await h.open();
-	await h.start();
-	await h.call("background_wait", {});
-	const setStatus = h.ctx.ui.setStatus;
-	h.ctx.ui.setStatus = () => { throw new Error("Expired UI"); };
-	try {
-		h.settle();
-		assert.equal((await h.nextNotice()).details.state, "completed");
-	} finally {
-		h.ctx.ui.setStatus = setStatus;
+test("only an exact successful standalone wait ending qualifies", () => {
+	assert.equal(isBackgroundWaitEnding(waitEnding()), true);
+	for (const count of [0, 1, 2]) assert.equal(isBackgroundWaitEnding(waitEnding().slice(0, count)), false);
+	const cases = [
+		messages => { messages[0].stopReason = "stop"; },
+		messages => { messages[1].isError = true; },
+		messages => { delete messages[1].isError; },
+		messages => { messages[1].toolCallId = "other"; },
+		messages => { messages[1].toolName = "other"; },
+		messages => { messages[2].stopReason = "pending"; },
+		messages => { messages[2].stopReason = "error"; },
+		messages => { messages[2].stopReason = "aborted"; },
+		messages => { messages[0].content.push({ type: "toolCall", name: "read", id: "read" }); },
+		messages => { messages[0].content.unshift({ type: "toolCall", name: "read", id: "read" }); },
+		messages => { messages[2].content.push({ type: "toolCall", name: "read", id: "read" }); },
+		messages => { messages.splice(2, 0, { role: "user", content: "New instruction" }); },
+		messages => { messages.splice(2, 0, { role: "custom", content: "Background finished" }); },
+		messages => { messages.splice(2, 0, { role: "assistant", content: [], stopReason: "stop" }); },
+	];
+	for (const change of cases) {
+		const messages = waitEnding();
+		change(messages);
+		assert.equal(isBackgroundWaitEnding(messages), false, change.toString());
 	}
 });
-
-for (const mode of ["tui", "json", "print"]) {
-	test(`${mode} does not emit the RPC-only waiting signal`, async t => {
-		const h = setup(t, mode);
-		await h.open();
-		await h.start();
-		await h.call("background_wait", {});
-		await h.close();
-		assert.deepEqual(h.statuses, []);
-	});
-}
