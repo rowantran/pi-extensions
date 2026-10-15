@@ -35,7 +35,7 @@ import { stripTerminalSequences, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { withCompactToolRendering } from "./compact-tools.ts";
 import { renderBackgroundMessage } from "./background/render.ts";
-import { isBackgroundWaitEnding, type WaitMessage } from "./background/wait.ts";
+import { isBackgroundWaitEnding, waitMessageMetadata, type WaitMessage } from "./background/wait.ts";
 import { agentSessionFiles, BackgroundUsageReader, backgroundStatusText, backgroundUsageText, type AgentUsage, type BackgroundUsage } from "./background/usage.ts";
 import { BACKGROUND_WIDGET_ID, backgroundWidgetLines, renderBackgroundWidgetLines } from "./background/widget.ts";
 import {
@@ -118,7 +118,8 @@ interface AgentActivity extends BaseActivity {
 	runId: number;
 	notifiedRunId: number;
 	runError?: string;
-	recentMessages?: WaitMessage[];
+	runAborted?: boolean;
+	waitMessages?: WaitMessage[];
 	reapTimer?: NodeJS.Timeout;
 }
 
@@ -590,19 +591,30 @@ export default function background(pi: ExtensionAPI): void {
 				// Pi omits this failed attempt from the context before retrying.
 				// Inner agent_start events are not new logical runs.
 				if (event.type === "auto_retry_start" || event.reason === "overflow") {
-					const last = activity.recentMessages?.at(-1);
+					const last = activity.waitMessages?.at(-1);
 					if (last?.role === "assistant" && (last.stopReason === "error" || last.stopReason === "length")) {
-						activity.recentMessages?.pop();
+						activity.waitMessages?.pop();
 					}
 				}
 				break;
 			}
+			case "compaction_end": {
+				if (event.aborted) { activity.runAborted = true; activity.runError = undefined; }
+				else if (event.reason === "overflow" && event.errorMessage) activity.runError = event.errorMessage;
+				break;
+			}
 			case "agent_settled": {
+				if ("error" in event && event.error === true) activity.runError ??= "Background agent run failed";
 				// A child may itself be waiting on nested tasks. Keep its slot and
 				// runtime alive until it finishes, not just until its foreground pauses.
-				const waits = !("aborted" in event && event.aborted === true) && !activity.runError
-					&& isBackgroundWaitEnding(activity.recentMessages ?? []);
-				activity.recentMessages = [];
+				const messages = activity.waitMessages ?? [];
+				const lastAssistant = messages.findLast((message) => message.role === "assistant");
+				const waits = !("aborted" in event && event.aborted === true) && !activity.runAborted && !activity.runError
+					&& lastAssistant?.stopReason !== "error" && lastAssistant?.stopReason !== "aborted"
+					&& isBackgroundWaitEnding(messages);
+				// A later wake-up is a fresh logical run, even if it has no messages.
+				activity.waitMessages = [];
+				activity.runAborted = false;
 				if (waits) break;
 				addAgentActivity(activity, "agent completed a run");
 				const runId = activity.runId;
@@ -616,7 +628,11 @@ export default function background(pi: ExtensionAPI): void {
 				addAgentActivity(activity, `finished ${event.toolName}${event.isError ? " with an error" : ""}`);
 				break;
 			case "message_end": {
-				activity.recentMessages = [...(activity.recentMessages ?? []).slice(-2), event.message];
+				// Keep lifecycle metadata for this logical run, not potentially large
+				// assistant text, tool arguments, or results. Only delivered user
+				// input resets the decision; inner starts and notices do not.
+				if (event.message.role === "user") activity.waitMessages = [];
+				(activity.waitMessages ??= []).push(waitMessageMetadata(event.message));
 				const info = messageInfo(event.message);
 				if (info.text) {
 					activity.lastText = info.text;
@@ -748,7 +764,8 @@ export default function background(pi: ExtensionAPI): void {
 		activity.starting = true;
 		activity.endedAt = undefined;
 		activity.error = activity.runError = undefined;
-		activity.recentMessages = [];
+		activity.runAborted = false;
+		activity.waitMessages = [];
 		activity.lastText = "";
 		try {
 			await activity.reapPromise;
