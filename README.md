@@ -201,14 +201,24 @@ approval.
 Ask questions in the normal response without calling `background_wait`.
 Running background tasks alone do not suppress the completion bell.
 
-The tool does not set a waiting flag or write a footer entry. The matching
-`pi-remote` client checks the run's last three messages when Pi emits
-`agent_settled`: an assistant message whose only tool call is
-`background_wait`, its matching successful result, and a normal final assistant
-reply with no tool calls. Only that ending keeps the root program status
-`working` without a completion bell. An intervening message, another tool,
-a failed wait, or an error/cancellation does not qualify. Seeing the tool
-finish while the run is still active is not enough.
+The tool does not set a waiting flag or write a footer entry. When Pi emits
+`agent_settled`, the native `emit-terminal-bel.ts` extension and the matching
+`pi-remote` client stay quiet if the last tool call was a successful
+`background_wait`. The check starts at the later of the logical run's start or
+its latest delivered user message. Steering and follow-up input therefore clear
+an earlier wait; another successful wait can restore it. Background notices and
+assistant reply text do not affect the decision. Sibling call order determines
+the last call; tool-result arrival order does not. Success requires a matching
+call ID, result tool name, and `isError: false`. Seeing the tool finish during
+an active run is not enough: the decision is made only at settlement.
+
+Native Pi reads delivered session history and ignores failed retry and overflow
+attempts that Pi marked as omitted. Compaction does not erase the wait decision,
+and removing user input from model context does not undo its delivery. Each new
+run starts without a wait decision: a no-tool wake-up rings rather than
+inheriting a prior wait.
+The matching `pi-remote` client also keeps its program status `working` while
+waiting. Update both repositories to use the same policy.
 
 A parent applies the same completed-run check to a background child waiting
 on its own nested tasks. It keeps the child running until its actual final
@@ -217,9 +227,10 @@ a new instruction starts an idle waiting child immediately; stopping a child
 shuts down its runtime immediately so nested completion notices cannot restart
 it. Its saved session remains resumable.
 
-Dialogs and errors still request user attention. Other RPC clients need no
-special footer handling, and native Pi TUI, JSON, and print modes keep their
-existing bell behavior.
+Errors still ring, and cancellation stays quiet. The native bell extension
+writes only in TUI mode; RPC, JSON, and print modes receive no terminal bell
+from it. Other RPC clients own their notification policy and need no special
+footer handling. Pi-remote's blocking-dialog notifications remain separate.
 
 ### Message rendering
 

@@ -12,6 +12,7 @@ import {
 	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import background from "../background.ts";
+import terminalBell from "../emit-terminal-bel.ts";
 import { isBackgroundWaitEnding } from "../background/wait.ts";
 import { fixture } from "./background-helpers.mjs";
 
@@ -63,6 +64,11 @@ function streamReply(f, model, context, options) {
 			assert.ok(step, "Unexpected model continuation request");
 			step.inspect?.(request);
 			stream.push({ type: "start", partial: output });
+			if (step.error) {
+				output.stopReason = "error"; output.errorMessage = step.error;
+				stream.push({ type: "error", reason: "error", error: output });
+				return;
+			}
 			if (step.tool) {
 				const call = { type: "toolCall", id: `integration-call-${f.requests.length}`, name: step.tool.name, arguments: {} };
 				output.content.push(call);
@@ -92,10 +98,15 @@ function streamReply(f, model, context, options) {
 	return stream;
 }
 
-async function setup(t) {
+async function setup(t, mode = "rpc", retry = false) {
 	const f = Object.assign(fixture(t), {
 		steps: [], requests: [], timeline: [], statuses: [],
-		providerErrors: [], extensionErrors: [], pids: new Set(),
+		providerErrors: [], extensionErrors: [], pids: new Set(), bells: 0,
+	});
+	const write = process.stdout.write.bind(process.stdout);
+	t.mock.method(process.stdout, "write", (chunk, ...args) => {
+		if (chunk === "\x07") { f.bells++; return true; }
+		return write(chunk, ...args);
 	});
 	f.record = (event) => f.timeline.push({ ...event,
 		...(event.type === "agent_settled" ? { waiting: isBackgroundWaitEnding(f.session.messages) } : {}),
@@ -109,11 +120,11 @@ async function setup(t) {
 		cwd: f.cwd, agentDir: f.agentDir, modelRuntime,
 		settingsManager: SettingsManager.inMemory({
 			defaultProvider: provider, defaultModel: "offline", defaultThinkingLevel: "off",
-			compaction: { enabled: false }, retry: { enabled: false }, cacheWarming: "off",
+			compaction: { enabled: false }, retry: { enabled: retry, maxRetries: 1, baseDelayMs: 500, maxAgentDelayMs: 500 }, cacheWarming: "off",
 		}),
 		resourceLoaderOptions: {
 			noExtensions: true, noSkills: true, noContextFiles: true, noPromptTemplates: true, noThemes: true,
-			extensionFactories: [background, (pi) => {
+			extensionFactories: [background, terminalBell, (pi) => {
 				pi.registerProvider(provider, {
 					baseUrl: "http://offline.invalid", apiKey: "unused-offline-test-key", api: "openai-completions",
 					models: [{ id: "offline", name: "Offline background wait test", reasoning: false, input: ["text"],
@@ -123,6 +134,7 @@ async function setup(t) {
 				for (const type of ["agent_start", "agent_settled", "tool_execution_start", "tool_execution_end", "ui_prompt_start", "ui_prompt_end"]) {
 					pi.on(type, (event) => {
 						f.record(event);
+						if (type === "tool_execution_end" && event.toolName === "background_wait" && !event.isError) f.onWait?.(pi);
 						if (type === "tool_execution_end" && event.toolName === "background_start" && !event.isError) {
 							const pid = Number(textOf(event.result).match(/\bPID (\d+)\./)?.[1]);
 							assert.ok(pid > 0, "The actual shell start result must report its PID");
@@ -151,7 +163,7 @@ async function setup(t) {
 	});
 
 	await session.bindExtensions({
-		mode: "rpc",
+		mode,
 		uiContext: {
 			setStatus(key, value) { f.statuses.push([key, value]); },
 			setWidget() {}, notify() {},
@@ -169,6 +181,58 @@ async function setup(t) {
 		assert.equal(session.isIdle, true);
 	};
 	return f;
+}
+
+test("native TUI stays quiet when a real SDK retry is cancelled during backoff", { timeout: 10_000 }, async (t) => {
+	const f = await setup(t, "tui", true);
+	let retries = 0;
+	const unsubscribe = f.session.subscribe((event) => {
+		if (event.type === "auto_retry_start") {
+			retries++;
+			setImmediate(() => { void f.session.abort(); });
+		}
+	});
+	t.after(unsubscribe);
+	f.steps.push({ error: "Overloaded" });
+	await f.session.prompt("Answer this question.");
+	assert.equal(retries, 1);
+	assert.equal(f.timeline.filter((event) => event.type === "agent_settled").length, 1);
+	assert.equal(f.bells, 0);
+	assert.equal(f.session.isIdle, true);
+	assert.deepEqual(f.providerErrors, []); assert.deepEqual(f.extensionErrors, []);
+	assert.deepEqual(f.steps, []);
+});
+
+test("native TUI bells stay quiet for a real wait and ring for a later answer", { timeout: 20_000 }, async (t) => {
+	const f = await setup(t, "tui");
+	f.onWait = (pi) => pi.sendMessage({ customType: "background", content: "Shell check-in: still running", display: true },
+		{ deliverAs: "steer", triggerTurn: false });
+	f.steps.push(
+		toolCall("background_start", { kind: "shell", command: "sleep 60" }),
+		toolCall("background_wait"), finalText("Waiting."),
+	);
+	await f.session.prompt("Start background work and wait.");
+	f.assertHealthy();
+	assert.equal(f.bells, 0);
+	assert.ok(f.session.messages.some((message) => message.role === "custom" && textOf(message).includes("check-in")));
+	f.steps.push(finalText("The task is still running. Should I stop it?"));
+	await f.session.prompt("Give me an update.");
+	f.assertHealthy();
+	assert.equal(f.bells, 1);
+});
+
+for (const input of ["steer", "followUp"]) {
+	test(`native TUI bells clear a wait after delivered ${input} input in the same real run`, { timeout: 20_000 }, async (t) => {
+		const f = await setup(t, "tui");
+		f.onWait = (pi) => pi.sendUserMessage("Answer my new question.", { deliverAs: input });
+		f.steps.push(toolCall("background_start", { kind: "shell", command: "sleep 60" }), toolCall("background_wait"));
+		if (input === "followUp") f.steps.push(finalText("Waiting."));
+		f.steps.push(finalText("Here is the answer."));
+		await f.session.prompt("Start background work and wait.");
+		f.assertHealthy();
+		assert.equal(f.timeline.filter((event) => event.type === "agent_settled").length, 1);
+		assert.equal(f.bells, 1);
+	});
 }
 
 test("a failed background_wait automatically follows up in the same real SDK run without a waiting status", { timeout: 20_000 }, async (t) => {
@@ -205,7 +269,8 @@ test("waiting survives settlement and clears before a plain-text question on the
 			assert.equal(start.isError, false);
 			assert.equal(wait.isError, false);
 			assert.deepEqual(wait.details, { activities: [start.details.id] });
-			assert.equal(isBackgroundWaitEnding(f.session.messages), false, "The final reply is not complete yet");
+			assert.equal(isBackgroundWaitEnding(f.session.messages), true, "The wait has succeeded, but notification decisions still wait for settlement");
+			assert.equal(f.timeline.filter((event) => event.type === "agent_settled").length, 0);
 		}),
 	);
 	await f.session.prompt("Start a long background task, then wait for it.");
