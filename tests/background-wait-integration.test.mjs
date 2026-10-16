@@ -69,13 +69,16 @@ function streamReply(f, model, context, options) {
 				stream.push({ type: "error", reason: "error", error: output });
 				return;
 			}
-			if (step.tool) {
-				const call = { type: "toolCall", id: `integration-call-${f.requests.length}`, name: step.tool.name, arguments: {} };
-				output.content.push(call);
-				stream.push({ type: "toolcall_start", contentIndex: 0, partial: output });
-				call.arguments = step.tool.args;
-				stream.push({ type: "toolcall_delta", contentIndex: 0, delta: JSON.stringify(call.arguments), partial: output });
-				stream.push({ type: "toolcall_end", contentIndex: 0, toolCall: call, partial: output });
+			const tools = step.tools ?? (step.tool ? [step.tool] : []);
+			if (tools.length) {
+				for (const [contentIndex, tool] of tools.entries()) {
+					const call = { type: "toolCall", id: `integration-call-${f.requests.length}-${contentIndex}`, name: tool.name, arguments: {} };
+					output.content.push(call);
+					stream.push({ type: "toolcall_start", contentIndex, partial: output });
+					call.arguments = tool.args;
+					stream.push({ type: "toolcall_delta", contentIndex, delta: JSON.stringify(call.arguments), partial: output });
+					stream.push({ type: "toolcall_end", contentIndex, toolCall: call, partial: output });
+				}
 				output.stopReason = "toolUse";
 			} else {
 				output.content.push({ type: "text", text: "" });
@@ -176,7 +179,13 @@ async function setup(t, mode = "rpc", retry = false) {
 	f.assertHealthy = () => {
 		assert.deepEqual(f.providerErrors, []);
 		assert.deepEqual(f.extensionErrors, []);
-		assert.equal(session.messages.at(-1).stopReason, "stop", session.messages.at(-1).errorMessage);
+		const last = session.messages.findLast((message) => message.role === "assistant" || message.role === "toolResult");
+		if (last.role === "toolResult") {
+			assert.equal(last.toolName, "background_wait");
+			assert.equal(last.isError, false);
+		} else {
+			assert.equal(last.stopReason, "stop", last.errorMessage);
+		}
 		assert.deepEqual(f.steps, [], "Every scripted continuation must run");
 		assert.equal(session.isIdle, true);
 	};
@@ -209,7 +218,7 @@ test("native TUI bells stay quiet for a real wait and ring for a later answer", 
 		{ deliverAs: "steer", triggerTurn: false });
 	f.steps.push(
 		toolCall("background_start", { kind: "shell", command: "sleep 60" }),
-		toolCall("background_wait"), finalText("Waiting."),
+		toolCall("background_wait"),
 	);
 	await f.session.prompt("Start background work and wait.");
 	f.assertHealthy();
@@ -226,7 +235,6 @@ for (const input of ["steer", "followUp"]) {
 		const f = await setup(t, "tui");
 		f.onWait = (pi) => pi.sendUserMessage("Answer my new question.", { deliverAs: input });
 		f.steps.push(toolCall("background_start", { kind: "shell", command: "sleep 60" }), toolCall("background_wait"));
-		if (input === "followUp") f.steps.push(finalText("Waiting."));
 		f.steps.push(finalText("Here is the answer."));
 		await f.session.prompt("Start background work and wait.");
 		f.assertHealthy();
@@ -258,45 +266,102 @@ test("a failed background_wait automatically follows up in the same real SDK run
 	assert.equal(f.timeline.find((event) => event.type === "agent_settled").waiting, false);
 });
 
-test("waiting survives settlement and clears before a plain-text question on the next run", { timeout: 20_000 }, async (t) => {
-	const f = await setup(t);
-	f.steps.push(
-		toolCall("background_start", { kind: "shell", command: "sleep 60", name: "Integration waiting task" }),
-		toolCall("background_wait"),
-		finalText("Waiting for the background task.", ({ messages }) => {
-			const start = resultsOf(messages, "background_start").at(-1);
-			const wait = resultsOf(messages, "background_wait").at(-1);
-			assert.equal(start.isError, false);
-			assert.equal(wait.isError, false);
-			assert.deepEqual(wait.details, { activities: [start.details.id] });
-			assert.equal(isBackgroundWaitEnding(f.session.messages), true, "The wait has succeeded, but notification decisions still wait for settlement");
-			assert.equal(f.timeline.filter((event) => event.type === "agent_settled").length, 0);
-		}),
-	);
-	await f.session.prompt("Start a long background task, then wait for it.");
-	f.assertHealthy();
-	assert.equal(f.requests.length, 3);
-	assert.equal(f.session.getLastAssistantText(), "Waiting for the background task.");
-	assert.equal(isBackgroundWaitEnding(f.session.messages), true);
-	assert.equal(f.timeline.find((event) => event.type === "agent_settled").waiting, true);
-	assert.ok(f.statuses.every(([key]) => key === "background"), "Waiting adds no footer status");
-	assert.equal(f.pids.size, 1);
-	assert.ok([...f.pids].every(isAlive), "The actual sleep process is still running after settlement");
+for (const mode of ["rpc", "tui"]) {
+	test(`a successful wait ends the ${mode} run without another model request and clears on new input`, { timeout: 20_000 }, async (t) => {
+		const f = await setup(t, mode);
+		f.steps.push(
+			toolCall("background_start", { kind: "shell", command: "sleep 60", name: "Integration waiting task" }),
+			toolCall("background_wait"),
+		);
+		await f.session.prompt("Start a long background task, then wait for it.");
+		f.assertHealthy();
+		assert.equal(f.requests.length, 2, "A successful wait must not trigger an automatic model follow-up");
+		const start = resultsOf(f.session.messages, "background_start").at(-1);
+		const wait = resultsOf(f.session.messages, "background_wait").at(-1);
+		assert.equal(start.isError, false);
+		assert.equal(wait.isError, false);
+		assert.deepEqual(wait.details, { activities: [start.details.id] });
+		assert.equal(f.session.messages.at(-1), wait, "The run ends at the wait result, with no final assistant reply");
+		assert.equal(isBackgroundWaitEnding(f.session.messages), true);
+		assert.equal(f.timeline.find((event) => event.type === "agent_settled").waiting, true);
+		assert.ok(f.statuses.every(([key]) => key === "background"), "Waiting adds no footer status");
+		assert.equal(f.pids.size, 1);
+		assert.ok([...f.pids].every(isAlive), "The actual sleep process is still running after settlement");
+		assert.equal(f.bells, 0);
 
-	const question = "Should I keep the task running?";
-	const boundary = f.timeline.length;
-	f.steps.push(finalText(question, () => {
-		assert.equal(isBackgroundWaitEnding(f.session.messages), false, "New input makes the previous wait ending ineligible");
-	}));
-	await f.session.prompt("Ask me whether to keep the task running.");
-	f.assertHealthy();
-	assert.equal(f.requests.length, 4);
-	assert.equal(f.session.getLastAssistantText(), question);
-	assert.equal(isBackgroundWaitEnding(f.session.messages), false);
-	assert.ok(f.statuses.every(([key]) => key === "background"));
-	assert.ok([...f.pids].every(isAlive), "A running task alone must not suppress a question");
-	const events = f.timeline.slice(boundary);
-	assert.equal(events.filter((event) => event.type === "agent_start").length, 1);
-	assert.equal(events.filter((event) => event.type === "agent_settled").length, 1);
-	assert.equal(events.find((event) => event.type === "agent_settled").waiting, false);
-});
+		const question = "Should I keep the task running?";
+		const boundary = f.timeline.length;
+		f.steps.push(finalText(question, () => {
+			assert.equal(isBackgroundWaitEnding(f.session.messages), false, "New input makes the previous wait ending ineligible");
+		}));
+		await f.session.prompt("Ask me whether to keep the task running.");
+		f.assertHealthy();
+		assert.equal(f.requests.length, 3);
+		assert.equal(f.session.getLastAssistantText(), question);
+		assert.equal(isBackgroundWaitEnding(f.session.messages), false);
+		assert.ok(f.statuses.every(([key]) => key === "background"));
+		assert.ok([...f.pids].every(isAlive), "A running task alone must not suppress a question");
+		const events = f.timeline.slice(boundary);
+		assert.equal(events.filter((event) => event.type === "agent_start").length, 1);
+		assert.equal(events.filter((event) => event.type === "agent_settled").length, 1);
+		assert.equal(events.find((event) => event.type === "agent_settled").waiting, false);
+		assert.equal(f.bells, mode === "tui" ? 1 : 0);
+	});
+}
+
+for (const waitLast of [false, true]) {
+	test(`a wait alongside a non-terminating sibling still follows up (wait last: ${waitLast})`, { timeout: 20_000 }, async (t) => {
+		const f = await setup(t);
+		const tools = [
+			{ name: "background_wait", args: {} },
+			{ name: "background_start", args: { kind: "shell", command: "sleep 60" } },
+		];
+		if (waitLast) tools.reverse();
+		f.steps.push(
+			toolCall("background_start", { kind: "shell", command: "sleep 60" }),
+			{ tools },
+			finalText("Both background tasks are running."),
+		);
+		await f.session.prompt("Start background work.");
+		f.assertHealthy();
+		assert.equal(resultsOf(f.session.messages, "background_wait").at(-1).isError, false);
+		assert.equal(f.requests.length, 3, "One terminating tool must not suppress a sibling's model follow-up");
+		assert.equal(f.session.getLastAssistantText(), "Both background tasks are running.");
+	});
+}
+
+for (const mode of ["rpc", "tui"]) {
+	test(`shell completion wakes a terminated ${mode} run`, { timeout: 20_000 }, async (t) => {
+		const f = await setup(t, mode);
+		const gate = join(f.root, "finish-shell");
+		f.steps.push(
+			toolCall("background_start", { kind: "shell", command: `while [ ! -f '${gate}' ]; do sleep 0.01; done; echo finished` }),
+			toolCall("background_wait"),
+		);
+		await f.session.prompt("Start a background shell and wait for completion.");
+		f.assertHealthy();
+		assert.equal(f.requests.length, 2);
+		assert.equal(f.bells, 0);
+		f.steps.push(finalText("The background shell finished.", ({ messages }) => {
+			assert.ok(messages.some((message) => message.role === "user" && textOf(message).includes("finished")),
+				"The completion notice must reach the resumed model");
+		}));
+		const settled = new Promise((resolve, reject) => {
+			// Background shells and their timers are unref'd; keep the test alive until wake-up.
+			const timer = setTimeout(() => reject(new Error("No settlement after shell completion")), 10_000);
+			const unsubscribe = f.session.subscribe((event) => {
+				if (event.type === "agent_settled") { clearTimeout(timer); unsubscribe(); resolve(); }
+			});
+			t.after(() => { clearTimeout(timer); unsubscribe(); });
+		});
+		writeFileSync(gate, "finish\n");
+		await settled;
+		f.assertHealthy();
+		assert.equal(f.requests.length, 3, "Only the completion notice should trigger another model request");
+		assert.equal(f.session.getLastAssistantText(), "The background shell finished.");
+		assert.equal(f.timeline.filter((event) => event.type === "agent_settled").length, 2);
+		assert.ok(f.session.messages.some((message) => message.role === "custom" && message.customType === "background"
+			&& message.details?.event === "completion"));
+		assert.equal(f.bells, mode === "tui" ? 1 : 0);
+	});
+}
