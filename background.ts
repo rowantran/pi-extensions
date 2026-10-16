@@ -1023,10 +1023,10 @@ export default function background(pi: ExtensionAPI): void {
 		exposure: "model-only",
 		annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: false },
 		description:
-			"Declare that you are ending this run only to wait on running background tasks and need no user input. Returns immediately; completion notices wake you automatically. Call this as your last tool, not alongside other tools. Fails if no background task is running.",
+			"End this run to wait on running background tasks when you need no user input. Returns immediately and skips the automatic model follow-up; completion notices wake you automatically. Call this alone as your last tool, not alongside other tools. Fails if no background task is running.",
 		promptSnippet: "Wait on running background tasks without requesting user attention",
 		promptGuidelines: [
-			"When your only remaining work is waiting for background tasks and no user input is needed, call background_wait as your last tool, then end the turn. It returns immediately; do not poll or repeatedly call it.",
+			"When your only remaining work is waiting for background tasks and no user input is needed, call background_wait alone as your last tool. It returns immediately and ends the run automatically; do not poll or repeatedly call it.",
 			"Never call background_wait when asking the user a question, presenting a choice, or requesting approval, even while background tasks run.",
 		],
 		parameters: Type.Object({}),
@@ -1035,8 +1035,9 @@ export default function background(pi: ExtensionAPI): void {
 			const active = waitable();
 			if (!active.length) throw new Error("No background tasks are running. Continue the current turn instead of waiting.");
 			return {
-				content: [{ type: "text", text: "Waiting on background task. End this turn without asking for user input; completion notices will wake you automatically." }],
+				content: [{ type: "text", text: "Waiting on background task; completion notices will wake you automatically." }],
 				details: { activities: active.map((activity) => activity.id) },
+				terminate: true,
 			};
 		},
 	});

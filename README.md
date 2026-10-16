@@ -191,12 +191,14 @@ keep running. Other APIs receive the schema and execution limits only.
 
 Call `background_wait` as the last tool when the only remaining work is waiting
 on running background tasks and nothing is needed from the user. It returns
-immediately; end the turn and let the existing completion notices wake the
-parent. It does not poll, collect output, or block the model's next step.
+immediately with `terminate: true`, ending the run without an automatic model
+follow-up. Existing completion notices wake the parent. It does not poll,
+collect output, or block while the task runs.
 If no task is running, the tool fails so the model can continue instead of
-waiting for a wake-up that will never arrive. Do not call it alongside other
-tools or while asking the user a question, presenting a choice, or requesting
-approval.
+waiting for a wake-up that will never arrive. Call it alone: Pi ends a tool
+batch only when every completed tool in it requests termination. A sibling
+that does not terminate still triggers a model follow-up. Do not call it while
+asking the user a question, presenting a choice, or requesting approval.
 
 Ask questions in the normal response without calling `background_wait`.
 Running background tasks alone do not suppress the completion bell.

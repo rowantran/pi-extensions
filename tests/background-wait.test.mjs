@@ -48,14 +48,14 @@ test("background_wait fails without running work, including retained stopped act
 });
 
 for (const mode of ["rpc", "tui", "json", "print"]) {
-	test(`background_wait returns immediately without changing footer status in ${mode} mode`, async t => {
+	test(`background_wait returns immediately and terminates without changing footer status in ${mode} mode`, async t => {
 		const h = setup(t, mode);
 		await h.open();
 		const child = await h.start();
 		const before = h.statuses.length;
 		const result = await h.call("background_wait", {});
 		assert.deepEqual(result.details, { activities: [child.details.id] });
-		assert.match(result.content[0].text, /End this turn without asking for user input/);
+		assert.equal(result.terminate, true, "A successful wait must end the run without another model request");
 		assert.equal(h.statuses.length, before);
 		assert.ok(h.statuses.every(([key]) => key === "background"), "Only normal usage accounting may write footer status");
 	});
@@ -66,8 +66,9 @@ test("a child waits only after agent_settled and resumes without a premature com
 	await h.open();
 	const child = await h.start();
 	// A recovered reply must clear an older error before evaluating this run.
-	h.messages([{ role: "assistant", content: [], stopReason: "error", errorMessage: "Temporary failure" }, ...waitEnding()]);
-	h.emit({ type: "agent_end", messages: waitEnding() });
+	const ending = waitEnding().slice(0, 2); // A terminating wait has no final assistant reply.
+	h.messages([{ role: "assistant", content: [], stopReason: "error", errorMessage: "Temporary failure" }, ...ending]);
+	h.emit({ type: "agent_end", messages: ending });
 	assert.equal(RpcClient.prototype.getLastAssistantText.mock.callCount(), 0);
 	h.settle();
 	assert.equal(RpcClient.prototype.getLastAssistantText.mock.callCount(), 0, "A temporary pause is not child completion");
