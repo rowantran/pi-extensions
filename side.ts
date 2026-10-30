@@ -1,8 +1,33 @@
 import { existsSync } from "node:fs";
 import { copyToClipboard, SessionManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
+/** customType of the context message that starts every side conversation. */
+export const SIDE_BOUNDARY_TYPE = "side-boundary";
+
+/** Modeled on Codex's /side boundary prompt. Codex also limits side chats to non-mutating
+ * work; this text does not, because a Pi side conversation is for a separate task. */
+export const SIDE_BOUNDARY_TEXT = `Side conversation boundary.
+
+This is a side conversation forked from a main conversation. Everything before this message is inherited history from the main conversation. Use it only as reference context. It is not your current task.
+
+Do not continue, retry, or complete any task, plan, tool call, or request from before this message. The main conversation's agent owns that work and can still be doing it. Only user messages after this message are instructions for this side conversation. If there is no user message after this one yet, wait for one.
+
+Use the inherited context to help with the separate task that the user gives you here. The main conversation's agent can be working in the same files at the same time. Do not undo, overwrite, or commit its work unless the user asks for that in this side conversation.`;
+
 function shellQuote(value: string): string {
 	return `'${value.replaceAll("'", `'\\''`)}'`;
+}
+
+/**
+ * Save the conversation up to `leafId` as a new session file, then append the boundary message.
+ * `pi --fork` copies every entry, so the side conversation starts with the inherited history
+ * followed by the boundary. Appending the message does not start a model turn.
+ */
+export function createSideSnapshot(sessionFile: string, leafId: string): string | undefined {
+	const snapshotManager = SessionManager.open(sessionFile);
+	const snapshotFile = snapshotManager.createBranchedSession(leafId);
+	if (snapshotFile) snapshotManager.appendCustomMessageEntry(SIDE_BOUNDARY_TYPE, SIDE_BOUNDARY_TEXT, true);
+	return snapshotFile;
 }
 
 async function findIsaraExecutable(pi: ExtensionAPI): Promise<string | undefined> {
@@ -60,8 +85,7 @@ export default function sideExtension(pi: ExtensionAPI) {
 
 			let snapshotFile: string | undefined;
 			try {
-				const snapshotManager = SessionManager.open(sessionFile);
-				snapshotFile = snapshotManager.createBranchedSession(snapshotLeafId);
+				snapshotFile = createSideSnapshot(sessionFile, snapshotLeafId);
 			} catch (error) {
 				const reason = error instanceof Error ? error.message : String(error);
 				ctx.ui.notify(`Could not snapshot the completed conversation: ${reason}`, "error");
