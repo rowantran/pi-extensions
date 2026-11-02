@@ -452,20 +452,27 @@ Both commands prompt for the token, so it does not appear in shell history.
 ## Side conversations
 
 `/side` works only in Pi's interactive terminal mode. It saves the conversation up
-to the last completed turn as a new session file. Then it copies a command that
-starts a sandboxed side agent with `isara pi run -- --fork <snapshot>`. Paste the
-command into another terminal pane.
+to the last completed turn as a new session file in
+`~/.pi/agent/side-sessions/<workspace>/`. Side sessions stay out of the main
+conversation's `/resume`. Then it starts a side agent on that file:
 
-Before copying the command, `/side` appends one visible `side-boundary` context
+- **In a pi-remote slot**, it uses pi-remote's extension API. pi-remote starts a
+  child slot with the same directory and Pi options as the current slot, and opens it
+  in a Ghostty split next to the pane where you typed `/side`. `/side PROMPT` sends
+  `PROMPT` as the side conversation's first message, once. The child slot stops with
+  its parent, and 90 seconds after its last client leaves. If the slot or its pane
+  does not open, `/side` says why.
+- **Elsewhere**, it copies a command that starts a sandboxed side agent with
+  `isara pi run -- --session <snapshot> --session-dir <side-sessions folder>`. Paste
+  the command into another terminal pane. The prompt argument is not used here.
+
+Before starting the side agent, `/side` appends one visible `side-boundary` context
 message to the snapshot. The message tells the side agent that the history above it
 is reference context from the main conversation, that it must not continue or retry
 the main conversation's work, and that only later user messages are its task. It
 also warns that the main agent can be changing the same files. Appending it does not
 start a model turn. The message is modeled on the hidden boundary prompt in Codex's
 `/side`, but it does not limit the side agent to read-only work.
-
-pi-remote has its own `/side`, which runs instead of this one in the pi-remote
-terminal client. It adds the same message.
 
 ## Tests
 
