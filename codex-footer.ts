@@ -9,6 +9,9 @@ const SEPARATOR = " · ";
 // Extension statuses shown on the main line right after the model, instead of
 // on the status line below.
 const MODEL_STATUS_KEYS = ["isara-fast"];
+// Extension statuses shown on the top line before the session name, such as
+// side.ts's "[side]" in a side conversation.
+const TITLE_STATUS_KEYS = ["side"];
 // Shown before the model when a virtual model (such as model-switcher/auto)
 // picks the physical model for each request.
 const VIRTUAL_MODEL_BADGE = "\uF074"; // Nerd Fonts nf-fa-shuffle
@@ -209,9 +212,13 @@ export default function codexFooter(pi: ExtensionAPI): void {
 					];
 
 					const lines: string[] = [];
+					const titleStatuses = TITLE_STATUS_KEYS.map((key) => sanitizeStatus(extensionStatuses.get(key) ?? ""))
+						.filter(Boolean)
+						.map((text) => theme.bold(theme.fg("customMessageLabel", text)));
 					const sessionName = sanitizeStatus(ctx.sessionManager.getSessionName() ?? "");
-					if (sessionName) {
-						lines.push(...packSegments([theme.bold(theme.fg("accent", sessionName))], width, theme));
+					const title = [...titleStatuses, ...(sessionName ? [theme.bold(theme.fg("accent", sessionName))] : [])];
+					if (title.length > 0) {
+						lines.push(...packSegments([title.join(" ")], width, theme));
 					}
 					lines.push(...packSegments(mainSegments, width, theme));
 
@@ -228,7 +235,7 @@ export default function codexFooter(pi: ExtensionAPI): void {
 					}
 
 					const statuses = Array.from(extensionStatuses.entries())
-						.filter(([key]) => !MODEL_STATUS_KEYS.includes(key))
+						.filter(([key]) => !MODEL_STATUS_KEYS.includes(key) && !TITLE_STATUS_KEYS.includes(key))
 						.sort(([left], [right]) => left.localeCompare(right))
 						.map(([key, text]) => {
 							const status = sanitizeStatus(text);

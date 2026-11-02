@@ -141,13 +141,12 @@ test("the footer marks a side conversation and clears the mark in other sessions
 	const ctx = (sessionManager) => ({
 		sessionManager,
 		ui: {
-			theme: { fg: (_color, text) => `<${text}>` },
 			setStatus: (key, text) => (text === undefined ? statuses.delete(key) : statuses.set(key, text)),
 		},
 	});
 
 	handlers.get("session_start")({}, ctx(side));
-	assert.equal(statuses.get(SIDE_STATUS_KEY), `<${SIDE_STATUS_TEXT}>`);
+	assert.equal(statuses.get(SIDE_STATUS_KEY), SIDE_STATUS_TEXT);
 	handlers.get("session_start")({}, ctx(main));
 	assert.equal(statuses.has(SIDE_STATUS_KEY), false);
 });

@@ -15,9 +15,9 @@ Do not continue, retry, or complete any task, plan, tool call, or request from b
 
 Use the inherited context to help with the separate task that the user gives you here. The main conversation's agent can be working in the same files at the same time. Do not undo, overwrite, or commit its work unless the user asks for that in this side conversation.`;
 
-/** Key of the footer status that marks a side conversation. */
+/** Key of the footer status that marks a side conversation. codex-footer.ts shows it before the session name. */
 export const SIDE_STATUS_KEY = "side";
-export const SIDE_STATUS_TEXT = "side conversation";
+export const SIDE_STATUS_TEXT = "[side]";
 
 /** True when the session has a side boundary, so it was started by /side (here or by pi-remote). */
 export function isSideSession(entries: ReadonlyArray<{ type: string; customType?: string }>): boolean {
@@ -139,7 +139,7 @@ export default function sideExtension(pi: ExtensionAPI) {
 		// session_start also runs after /new, /resume and /fork, so clear the status when it does not apply.
 		ctx.ui.setStatus(
 			SIDE_STATUS_KEY,
-			isSideSession(ctx.sessionManager.getEntries()) ? ctx.ui.theme.fg("accent", SIDE_STATUS_TEXT) : undefined,
+			isSideSession(ctx.sessionManager.getEntries()) ? SIDE_STATUS_TEXT : undefined,
 		);
 	});
 
