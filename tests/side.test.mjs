@@ -4,7 +4,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
-import sideExtension, { createSideSnapshot, PI_REMOTE_API_EVENT, SIDE_BOUNDARY_TEXT, SIDE_BOUNDARY_TYPE, sideSessionDir } from "../side.ts";
+import sideExtension, {
+	createSideSnapshot,
+	PI_REMOTE_API_EVENT,
+	SIDE_BOUNDARY_TEXT,
+	SIDE_BOUNDARY_TYPE,
+	SIDE_STATUS_KEY,
+	SIDE_STATUS_TEXT,
+	sideSessionDir,
+} from "../side.ts";
 
 test("side snapshot ends the settled history with a boundary that forks keep as the leaf", (t) => {
 	const root = mkdtempSync(join(tmpdir(), "pi-side-snapshot-"));
@@ -117,4 +125,29 @@ test("in a pi-remote slot, /side reports a pane or slot that did not open", asyn
 	const failingSlot = { ...failingPane, createChildSlot: async () => { throw new Error("Daemon is shutting down"); } };
 	const slot = await runSideInPiRemote(t, failingSlot);
 	assert.deepEqual(slot.notes, [{ message: "Could not start the side conversation: Daemon is shutting down", type: "error" }]);
+});
+
+test("the footer marks a side conversation and clears the mark in other sessions", (t) => {
+	const root = mkdtempSync(join(tmpdir(), "pi-side-status-"));
+	t.after(() => rmSync(root, { recursive: true, force: true }));
+	const main = SessionManager.create(root, join(root, "sessions"));
+	main.appendMessage({ role: "user", content: "Refactor the parser", timestamp: 1 });
+	const settled = main.appendMessage({ role: "assistant", content: [{ type: "text", text: "Done" }], timestamp: 2 });
+	const side = SessionManager.open(createSideSnapshot(main.getSessionFile(), settled, join(root, "side-sessions")));
+
+	const handlers = new Map();
+	sideExtension({ on: (event, handler) => handlers.set(event, handler), registerCommand() {}, events: { emit() {} } });
+	const statuses = new Map();
+	const ctx = (sessionManager) => ({
+		sessionManager,
+		ui: {
+			theme: { fg: (_color, text) => `<${text}>` },
+			setStatus: (key, text) => (text === undefined ? statuses.delete(key) : statuses.set(key, text)),
+		},
+	});
+
+	handlers.get("session_start")({}, ctx(side));
+	assert.equal(statuses.get(SIDE_STATUS_KEY), `<${SIDE_STATUS_TEXT}>`);
+	handlers.get("session_start")({}, ctx(main));
+	assert.equal(statuses.has(SIDE_STATUS_KEY), false);
 });

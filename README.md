@@ -474,6 +474,10 @@ also warns that the main agent can be changing the same files. Appending it does
 start a model turn. The message is modeled on the hidden boundary prompt in Codex's
 `/side`, but it does not limit the side agent to read-only work.
 
+A session that contains this message shows `side conversation` in the footer, so
+you can tell a side pane from the main one. This includes side sessions that you
+open again with `/resume`.
+
 ## Tests
 
 With dependencies installed, run `npm test` (Node.js 22.19 or newer). The tests
