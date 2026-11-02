@@ -16,7 +16,7 @@ const response = (model, stopReason = "stop", thinkingLevel = "high") => ({
 const selectAuto = { type: "model_change", provider: auto.provider, modelId: auto.id };
 
 /** Render the footer for a selected model, session branch, theme, and statuses. */
-function footerLines(selected, branch, renderTheme = theme, statuses = new Map()) {
+function footerLines(selected, branch, renderTheme = theme, statuses = new Map(), sessionName = undefined) {
 	let handler;
 	codexFooter({ on: (_event, fn) => { handler = fn; } });
 	let factory;
@@ -27,7 +27,7 @@ function footerLines(selected, branch, renderTheme = theme, statuses = new Map()
 		thinkingLevel: "high",
 		getContextUsage: () => undefined,
 		modelRegistry: { find: (provider, id) => physical.get(`${provider}/${id}`), isUsingOAuth: () => false },
-		sessionManager: { getBranch: () => branch, getEntries: () => branch, getSessionName: () => undefined },
+		sessionManager: { getBranch: () => branch, getEntries: () => branch, getSessionName: () => sessionName },
 		ui: { setFooter: (fn) => { factory = fn; } },
 	});
 	const footerData = {
@@ -108,4 +108,15 @@ test("an empty background status adds no footer line or colored empty segment", 
 	const lines = withEnv({ PI_EXPERIMENTAL: undefined }, () => footerLines(opus, [], coloredTheme,
 		new Map([["background", " \n\t "]])));
 	assert.equal(lines.length, 1);
+});
+
+test("the side status leads the session name on the top line, in its own color", () => {
+	const statuses = new Map([["side", "[side]"], ["other", "Plain status"]]);
+	const lines = withEnv({ PI_EXPERIMENTAL: undefined }, () =>
+		footerLines(opus, [], { ...theme, fg: (color, text) => `<${color}:${text}>` }, statuses, "Fix the parser"));
+	assert.equal(lines[0], "  <customMessageLabel:[side]> <accent:Fix the parser>");
+	assert.ok(!lines.slice(1).some((line) => line.includes("[side]")), "the side status is not repeated below");
+
+	const unnamed = withEnv({ PI_EXPERIMENTAL: undefined }, () => footerLines(opus, [], theme, new Map([["side", "[side]"]])));
+	assert.equal(unnamed[0], "  [side]");
 });
