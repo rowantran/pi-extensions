@@ -449,6 +449,12 @@ the service name `pi-slack-bot-token`:
 
 Both commands prompt for the token, so it does not appear in shell history.
 
+`slack_bot_send_message` accepts a channel ID (`C…`, `D…`, `G…`), a user ID
+(`U…`, which opens the bot's DM with that user), or the name of a channel the bot
+has joined. Name lookup uses `users.conversations`, which lists only the bot's
+channels. It does not use `conversations.list`: that method pages through every
+channel in the workspace, which exceeds Slack's rate limit and returns HTTP 429.
+
 ## Side conversations
 
 `/side` works only in Pi's interactive terminal mode. It saves the conversation up
