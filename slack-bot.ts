@@ -1,5 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { withCompactToolRendering } from "./compact-tools.ts";
 import { getBotToken } from "./slack-bot/token.ts";
 
 // Known channel name -> ID mappings, resolved locally to skip a lookup call.
@@ -98,7 +99,7 @@ export async function resolveChannel(
 		);
 		const id = result.channel?.id;
 		if (!id) throw new Error(`Slack conversations.open returned no DM channel for ${user}.`);
-		return { id, display: `DM with <@${user}> (${id})` };
+		return { id, display: `DM with ${user} (${id})` };
 	}
 
 	const name = value.replace(/^#/, "");
@@ -117,6 +118,7 @@ export async function resolveChannel(
 }
 
 export default function slackBotExtension(pi: ExtensionAPI) {
+	pi = withCompactToolRendering(pi);
 	pi.registerTool({
 		name: "slack_bot_send_message",
 		label: "Slack Bot: Send Message",

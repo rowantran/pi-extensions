@@ -558,6 +558,12 @@ function summarizeCustomToolArguments(args: unknown): string {
 	if (!args || typeof args !== "object") return "";
 
 	const values = args as Record<string, unknown>;
+	if (Object.keys(values).length === 0) return "";
+	// Messaging tools, e.g. `slack_bot_send_message`: show where the message goes, then the message.
+	if (typeof values.channel === "string" && values.channel) {
+		const text = typeof values.text === "string" && values.text ? ` · ${values.text}` : "";
+		return collapseWhitespace(`${values.channel}${text}`);
+	}
 	for (const key of ["query", "path", "command", "action", "task", "id", "name", "kind"]) {
 		if (typeof values[key] === "string" && values[key]) {
 			return collapseWhitespace(values[key]);

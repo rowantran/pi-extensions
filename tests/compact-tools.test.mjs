@@ -142,3 +142,11 @@ test("collapsed direct calls reuse layout while keeping result state live", () =
 		}
 	}
 });
+
+test("custom tool headings show a message's destination and text, and no braces for empty arguments", () => {
+	assert.equal(
+		callHeading(theme, "slack_bot_send_message", { channel: "C0ACK1LAFDH", text: "Deploy\n  finished" }),
+		"slack_bot_send_message(C0ACK1LAFDH · Deploy finished)",
+	);
+	assert.equal(callHeading(theme, "slack_bot_list_channels", {}), "slack_bot_list_channels");
+});
