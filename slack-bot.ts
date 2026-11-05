@@ -1,9 +1,9 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { withCompactToolRendering } from "./compact-tools.ts";
 import { getBotToken } from "./slack-bot/token.ts";
 
-// Known channel name -> ID mappings, resolved locally to avoid rate-limited
-// conversations.list calls (which return HTTP 429 fairly often).
+// Known channel name -> ID mappings, resolved locally to skip a lookup call.
 const KNOWN_CHANNELS: Record<string, string> = {
 	"rowan-log": "C0ACK1LAFDH",
 };
@@ -41,7 +41,9 @@ async function slackApi<T extends SlackResponse>(
 	});
 
 	if (!response.ok) {
-		throw new Error(`Slack ${method} request failed with HTTP ${response.status}.`);
+		const retryAfter = response.headers.get("retry-after");
+		const hint = response.status === 429 && retryAfter ? ` Retry after ${retryAfter} seconds.` : "";
+		throw new Error(`Slack ${method} request failed with HTTP ${response.status}.${hint}`);
 	}
 
 	const result = (await response.json()) as T;
@@ -51,17 +53,20 @@ async function slackApi<T extends SlackResponse>(
 	return result;
 }
 
-async function listVisibleChannels(token: string, signal?: AbortSignal): Promise<SlackChannel[]> {
+// Lists only channels the bot has joined. conversations.list would page through
+// every channel in the workspace (2,000+), which exceeds its Tier 2 rate limit
+// and returns HTTP 429. The bot can only post in channels it has joined anyway.
+async function listJoinedChannels(token: string, signal?: AbortSignal): Promise<SlackChannel[]> {
 	const channels: SlackChannel[] = [];
 	let cursor = "";
 
 	do {
 		const result = await slackApi<SlackResponse & { channels?: SlackChannel[] }>(
-			"conversations.list",
+			"users.conversations",
 			token,
 			{
 				types: "public_channel,private_channel",
-				exclude_archived: false,
+				exclude_archived: true,
 				limit: 200,
 				cursor,
 			},
@@ -74,7 +79,7 @@ async function listVisibleChannels(token: string, signal?: AbortSignal): Promise
 	return channels;
 }
 
-async function resolveChannel(
+export async function resolveChannel(
 	token: string,
 	input: string,
 	signal?: AbortSignal,
@@ -83,23 +88,37 @@ async function resolveChannel(
 	if (/^[CDG][A-Z0-9]+$/i.test(value)) {
 		return { id: value.toUpperCase(), display: value.toUpperCase() };
 	}
+	if (/^[UW][A-Z0-9]+$/i.test(value)) {
+		// A user ID: open (or reuse) the bot's DM with that user.
+		const user = value.toUpperCase();
+		const result = await slackApi<SlackResponse & { channel?: { id?: string } }>(
+			"conversations.open",
+			token,
+			{ users: user },
+			signal,
+		);
+		const id = result.channel?.id;
+		if (!id) throw new Error(`Slack conversations.open returned no DM channel for ${user}.`);
+		return { id, display: `DM with ${user} (${id})` };
+	}
 
 	const name = value.replace(/^#/, "");
 	const knownId = KNOWN_CHANNELS[name];
 	if (knownId) {
 		return { id: knownId, display: `#${name}` };
 	}
-	const channels = await listVisibleChannels(token, signal);
+	const channels = await listJoinedChannels(token, signal);
 	const channel = channels.find((candidate) => candidate.name === name);
 	if (!channel) {
 		throw new Error(
-			`Slack channel #${name} is not visible to the bot. Use a channel ID or invite the bot first.`,
+			`walle_rowanbot has not joined Slack channel #${name}. Invite the bot to the channel first.`,
 		);
 	}
 	return { id: channel.id, display: `#${channel.name ?? name}` };
 }
 
 export default function slackBotExtension(pi: ExtensionAPI) {
+	pi = withCompactToolRendering(pi);
 	pi.registerTool({
 		name: "slack_bot_send_message",
 		label: "Slack Bot: Send Message",
@@ -108,13 +127,13 @@ export default function slackBotExtension(pi: ExtensionAPI) {
 		promptSnippet: "Send Slack messages as walle_rowanbot through the Slack Web API",
 		promptGuidelines: [
 			"Use slack_bot_send_message whenever the user asks to send or post a Slack message; never use Slack MCP to send messages.",
-			"Prefer channel IDs over names: #rowan-log is C0ACK1LAFDH (name lookup via conversations.list is often rate-limited with HTTP 429).",
+			"Prefer channel IDs over names: #rowan-log is C0ACK1LAFDH. To DM a person, pass their user ID (U...); the tool opens the bot's DM with them.",
 			"To tag @rowan in a Slack message, use <@U0AAUUHUFRQ>.",
 		],
 		parameters: Type.Object({
 			channel: Type.String({
 				description:
-					"Slack channel name such as #rowan-log, or a channel/conversation ID. Prefer IDs; #rowan-log is C0ACK1LAFDH.",
+					"Slack channel name such as #rowan-log, a channel/conversation ID, or a user ID (U...) to DM that user. Prefer IDs; #rowan-log is C0ACK1LAFDH.",
 			}),
 			text: Type.String({ description: "Exact message text to send" }),
 			threadTs: Type.Optional(
@@ -161,8 +180,7 @@ export default function slackBotExtension(pi: ExtensionAPI) {
 		parameters: Type.Object({}),
 		async execute(_toolCallId, _params, signal) {
 			const token = await getBotToken(signal);
-			const channels = (await listVisibleChannels(token, signal))
-				.filter((channel) => channel.is_member && !channel.is_archived)
+			const channels = (await listJoinedChannels(token, signal))
 				.sort((a, b) => (a.name ?? "").localeCompare(b.name ?? ""))
 				.map((channel) => ({
 					name: channel.name ?? channel.id,
@@ -185,17 +203,5 @@ export default function slackBotExtension(pi: ExtensionAPI) {
 				details: { channels },
 			};
 		},
-	});
-
-	pi.on("tool_call", (event) => {
-		if (event.toolName === "slack_bot_send_message") return;
-		const name = event.toolName.toLowerCase();
-		if (name.includes("slack") && /(?:send|post|draft).*message|message.*(?:send|post|draft)/.test(name)) {
-			return {
-				block: true,
-				reason:
-					"Slack MCP message sending is disabled. Use slack_bot_send_message so the message is sent as walle_rowanbot.",
-			};
-		}
 	});
 }
