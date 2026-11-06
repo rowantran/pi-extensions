@@ -104,11 +104,12 @@ function streamReply(f, model, context, options) {
 async function setup(t, mode = "rpc", retry = false) {
 	const f = Object.assign(fixture(t), {
 		steps: [], requests: [], timeline: [], statuses: [],
-		providerErrors: [], extensionErrors: [], pids: new Set(), bells: 0,
+		providerErrors: [], extensionErrors: [], pids: new Set(), bells: 0, reports: [],
 	});
 	const write = process.stdout.write.bind(process.stdout);
 	t.mock.method(process.stdout, "write", (chunk, ...args) => {
 		if (chunk === "\x07") { f.bells++; return true; }
+		if (typeof chunk === "string" && chunk.startsWith("\x1b]7501;")) { f.reports.push(chunk); return true; }
 		return write(chunk, ...args);
 	});
 	f.record = (event) => f.timeline.push({ ...event,
@@ -214,6 +215,13 @@ test("native TUI stays quiet when a real SDK retry is cancelled during backoff",
 
 test("native TUI bells stay quiet for a real wait and ring for a later answer", { timeout: 20_000 }, async (t) => {
 	const f = await setup(t, "tui");
+	// Like Pi's interactive mode, which writes its own status report when a session
+	// listener gets agent_settled. The extension's report must come after it.
+	const DONE = "\x1b]7501;state=done:app=pi\x1b\\";
+	const unsubscribe = f.session.subscribe((event) => {
+		if (event.type === "agent_settled") process.stdout.write(DONE);
+	});
+	t.after(unsubscribe);
 	f.onWait = (pi) => pi.sendMessage({ customType: "background", content: "Shell check-in: still running", display: true },
 		{ deliverAs: "steer", triggerTurn: false });
 	f.steps.push(
@@ -223,11 +231,15 @@ test("native TUI bells stay quiet for a real wait and ring for a later answer", 
 	await f.session.prompt("Start background work and wait.");
 	f.assertHealthy();
 	assert.equal(f.bells, 0);
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.deepEqual(f.reports, [DONE, "\x1b]7501;state=working:app=pi\x1b\\"]);
 	assert.ok(f.session.messages.some((message) => message.role === "custom" && textOf(message).includes("check-in")));
 	f.steps.push(finalText("The task is still running. Should I stop it?"));
 	await f.session.prompt("Give me an update.");
 	f.assertHealthy();
 	assert.equal(f.bells, 1);
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(f.reports.at(-1), DONE, "An answer leaves Pi's done report in place");
 });
 
 for (const input of ["steer", "followUp"]) {

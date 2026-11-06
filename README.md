@@ -204,9 +204,9 @@ Ask questions in the normal response without calling `background_wait`.
 Running background tasks alone do not suppress the completion bell.
 
 The tool does not set a waiting flag or write a footer entry. When Pi emits
-`agent_settled`, the native `emit-terminal-bel.ts` extension and the matching
-`pi-remote` client stay quiet if the last tool call was a successful
-`background_wait`. The check starts at the later of the logical run's start or
+`agent_settled`, the `emit-terminal-bel.ts` extension stays quiet if the last
+tool call was a successful `background_wait`. Under pi-remote, the remote Pi
+loads this extension on the host, and pi-remote forwards its bell. The check starts at the later of the logical run's start or
 its latest delivered user message. Steering and follow-up input therefore clear
 an earlier wait; another successful wait can restore it. Background notices and
 assistant reply text do not affect the decision. Sibling call order determines
@@ -219,8 +219,15 @@ attempts that Pi marked as omitted. Compaction does not erase the wait decision,
 and removing user input from model context does not undo its delivery. Each new
 run starts without a wait decision: a no-tool wake-up rings rather than
 inheriting a prior wait.
-The matching `pi-remote` client also keeps its program status `working` while
-waiting. Update both repositories to use the same policy.
+
+The same check keeps the program status `working` (OSC 7501, which Rex reads)
+while waiting. Pi reports a settled run as `done` after extensions handle
+`agent_settled`, so on the next turn of the event loop the extension writes
+its own `working` report, unless a new run has started by then. The terminal
+sees `done` for a moment first; Rex-based urgency checks that wait for a
+report to last (such as aerospace-workspaces) ignore it. Through pi-remote,
+the remote Pi's report is forwarded like any other. `PI_PROGRAM_STATUS=0`
+turns the report off, as it does Pi's own.
 
 A parent applies the same completed-run check to a background child waiting
 on its own nested tasks. It keeps the child running until its actual final

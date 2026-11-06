@@ -2,6 +2,18 @@ import { isContextOverflow } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { isBackgroundWaitEnding } from "./background/wait.ts";
 
+/**
+ * An OSC 7501 program status report that says Pi is still working, in the same form as Pi's
+ * own reports. A run that ends in `background_wait` is still working: its tasks run on, and
+ * their completion notice wakes the agent. Pi itself reports such a run as `done`.
+ */
+export function workingStatusReport(sessionName?: string): string {
+	// Terminals drop reports whose decoded text has control characters.
+	const message = (sessionName ?? "").replace(/[\x00-\x1f\x7f-\x9f]/g, " ").trim();
+	const msg = message ? `:msg=${Buffer.from(message, "utf8").toString("base64")}` : "";
+	return `\x1b]7501;state=working:app=pi${msg}\x1b\\`;
+}
+
 export default function (pi: ExtensionAPI) {
 	let run: { sessionId: string; leafId: string | null; signal?: AbortSignal; outcome?: "error" | "cancelled" } | undefined;
 	const reset = () => { run = undefined; };
@@ -53,6 +65,12 @@ export default function (pi: ExtensionAPI) {
 		}
 		if (failed || last?.stopReason === "error" || !isBackgroundWaitEnding(messages)) {
 			process.stdout.write("\x07");
+		} else if (process.env.PI_PROGRAM_STATUS !== "0") {
+			// Pi writes its `done` report after extensions handle agent_settled, so replace it
+			// on the next turn of the event loop. Skip it if a new run has started by then.
+			// Terminals without OSC 7501 ignore the report.
+			const report = workingStatusReport(ctx.sessionManager.getSessionName());
+			setImmediate(() => { if (!run) process.stdout.write(report); });
 		}
 	});
 }
