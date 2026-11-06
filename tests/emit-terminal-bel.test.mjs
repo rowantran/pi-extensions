@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
-import terminalBell from "../emit-terminal-bel.ts";
+import terminalBell, { workingStatusReport } from "../emit-terminal-bel.ts";
 
 const call = (name = "background_wait", id = "wait") => ({ type: "toolCall", name, id, arguments: {} });
 const assistant = (content = [], stopReason = "stop") => ({ role: "assistant", content, stopReason });
@@ -15,11 +15,15 @@ function setup(t, mode = "tui") {
 	const controller = new AbortController();
 	const ctx = { mode, sessionManager: manager, signal: controller.signal };
 	let bells = 0;
+	const reports = [];
 	const write = process.stdout.write.bind(process.stdout);
 	t.mock.method(process.stdout, "write", (chunk, ...args) => {
 		if (chunk === "\x07") { bells++; return true; }
+		if (typeof chunk === "string" && chunk.startsWith("\x1b]7501;")) { reports.push(chunk); return true; }
 		return write(chunk, ...args);
 	});
+	// Let deferred status reports land in this test's mock, not a later test's.
+	t.after(() => new Promise((resolve) => setImmediate(resolve)));
 	const emit = (type, extra = {}) => handlers.get(type)?.({ type, ...extra }, ctx);
 	const append = (message) => manager.appendMessage({ timestamp: Date.now(), ...message });
 	const run = (messages = [], ending = {}) => {
@@ -27,7 +31,7 @@ function setup(t, mode = "tui") {
 		for (const message of messages) append(message);
 		emit("agent_settled", ending);
 	};
-	return { emit, append, run, manager, controller, ctx, get bells() { return bells; } };
+	return { emit, append, run, manager, controller, ctx, reports, get bells() { return bells; } };
 }
 
 for (const mode of ["tui", "rpc", "json", "print"]) {
@@ -193,3 +197,64 @@ for (const event of ["session_start", "session_tree", "session_shutdown"]) {
 		assert.equal(h.bells, 0);
 	});
 }
+
+const tick = () => new Promise((resolve) => setImmediate(resolve));
+const decode = (report) => {
+	const pairs = Object.fromEntries(report.slice("\x1b]7501;".length, -2).split(":").map((pair) => pair.split("=")));
+	return { ...pairs, ...(pairs.msg ? { msg: Buffer.from(pairs.msg, "base64").toString("utf8") } : {}) };
+};
+
+test("a run ending in a wait reports working after Pi's own done report", async t => {
+	const h = setup(t);
+	h.manager.appendSessionInfo("Benchmark run");
+	h.run(wait());
+	assert.deepEqual(h.reports, [], "Written on the next turn, after Pi's report");
+	await tick();
+	assert.equal(h.reports.length, 1);
+	assert.deepEqual(decode(h.reports[0]), { state: "working", app: "pi", msg: "Benchmark run" });
+	assert.equal(h.bells, 0);
+});
+
+test("runs that ring, fail, or are cancelled leave Pi's status alone", async t => {
+	const h = setup(t);
+	h.run([assistant()]);
+	h.run(wait(), { error: true });
+	h.run([...wait().slice(0, 2), assistant([], "error")]);
+	h.run(wait(), { aborted: true });
+	await tick();
+	assert.deepEqual(h.reports, []);
+	assert.equal(h.bells, 3);
+});
+
+for (const mode of ["rpc", "json", "print"]) {
+	test(`no status report in ${mode} mode`, async t => {
+		const h = setup(t, mode);
+		h.run(wait());
+		await tick();
+		assert.deepEqual(h.reports, []);
+	});
+}
+
+test("PI_PROGRAM_STATUS=0 turns the report off", async t => {
+	const previous = process.env.PI_PROGRAM_STATUS;
+	process.env.PI_PROGRAM_STATUS = "0";
+	t.after(() => { if (previous === undefined) delete process.env.PI_PROGRAM_STATUS; else process.env.PI_PROGRAM_STATUS = previous; });
+	const h = setup(t);
+	h.run(wait());
+	await tick();
+	assert.deepEqual(h.reports, []);
+});
+
+test("a run that starts before the report is written skips it", async t => {
+	const h = setup(t);
+	h.run(wait());
+	h.emit("agent_start");
+	await tick();
+	assert.deepEqual(h.reports, []);
+});
+
+test("the report has no control characters and omits an empty message", () => {
+	assert.equal(workingStatusReport(), "\x1b]7501;state=working:app=pi\x1b\\");
+	assert.equal(workingStatusReport(" \n "), "\x1b]7501;state=working:app=pi\x1b\\");
+	assert.deepEqual(decode(workingStatusReport("a\x1bb\nc")), { state: "working", app: "pi", msg: "a b c" });
+});
