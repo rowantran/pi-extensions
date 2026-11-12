@@ -189,18 +189,28 @@ keep running. Other APIs receive the schema and execution limits only.
 
 ### Waiting and user questions
 
-Call `background_wait` as the last tool when the only remaining work is waiting
-on running background tasks and nothing is needed from the user. It returns
-immediately with `terminate: true`, ending the run without an automatic model
-follow-up. Existing completion notices wake the parent. It does not poll,
-collect output, or block while the task runs.
+A run can end in two ways while background tasks keep running, and completion
+notices wake the parent after either one:
+
+- With a normal message, when there is an answer, results, or a question for
+  the user. Pi reports the run as done and the bell rings.
+- With `background_wait`, when there is nothing for the user to read. The run
+  ends without a message, the bell stays quiet, and the program status stays
+  `working`.
+
+`background_wait` is therefore not needed in order to wait, and it must not
+carry a reply: no model turn follows it, and the user does not see thinking.
+The tool description and prompt guidelines state this choice in terms of what
+the user has to read, not in terms of whether user input is needed.
+
+`background_wait` returns immediately with `terminate: true`, ending the run
+without an automatic model follow-up. It does not poll, collect output, or
+block while the task runs.
 If no task is running, the tool fails so the model can continue instead of
 waiting for a wake-up that will never arrive. Call it alone: Pi ends a tool
 batch only when every completed tool in it requests termination. A sibling
-that does not terminate still triggers a model follow-up. Do not call it while
-asking the user a question, presenting a choice, or requesting approval.
+that does not terminate still triggers a model follow-up.
 
-Ask questions in the normal response without calling `background_wait`.
 Running background tasks alone do not suppress the completion bell.
 
 The tool does not set a waiting flag or write a footer entry. When Pi emits
