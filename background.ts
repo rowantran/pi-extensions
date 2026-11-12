@@ -1023,11 +1023,12 @@ export default function background(pi: ExtensionAPI): void {
 		exposure: "model-only",
 		annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: false },
 		description:
-			"End this run to wait on running background tasks when you need no user input. Returns immediately and skips the automatic model follow-up; completion notices wake you automatically. Call this alone as your last tool, not alongside other tools. Fails if no background task is running.",
-		promptSnippet: "Wait on running background tasks without requesting user attention",
+			"End this run without a message while background tasks keep running. Use it only when you have nothing for the user to read. If you have an answer, results, or a question for the user, do not call this tool: write that as your final message and end the turn. Completion notices wake you either way. Returns immediately and no model turn follows. Call this alone, not alongside other tools. Fails if no background task is running.",
+		promptSnippet: "End the run without a message while background tasks run and you have nothing for the user to read",
 		promptGuidelines: [
-			"When your only remaining work is waiting for background tasks and no user input is needed, call background_wait alone as your last tool. It returns immediately and ends the run automatically; do not poll or repeatedly call it.",
-			"Never call background_wait when asking the user a question, presenting a choice, or requesting approval, even while background tasks run.",
+			"Completion notices wake you whether your turn ends with a message or with background_wait. You never need background_wait in order to keep waiting.",
+			"If the user asked you something, or you have results or a question for them, end the turn with that message and do not call background_wait, even while background tasks run. The user does not see your thinking, and no model turn follows background_wait.",
+			"Call background_wait alone as your last tool only when background tasks are running and you have nothing for the user to read. It returns immediately and ends the run; do not poll or repeatedly call it.",
 		],
 		parameters: Type.Object({}),
 		async execute(_toolCallId, _params, signal) {
